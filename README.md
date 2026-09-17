@@ -61,6 +61,28 @@ graph TD
 
 ## Quick Start
 
+### Docker Compose（推荐）
+
+```bash
+git clone https://github.com/hashwnath/palantir-ontology-agents.git
+cd palantir-ontology-agents
+
+# Optional: copy and fill API keys (demo mode works without them)
+# OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL for any OpenAI-compatible endpoint
+cp .env.example .env
+
+docker compose up --build
+```
+
+Open http://localhost:8501
+
+```bash
+# Stop
+docker compose down
+```
+
+### Local
+
 ```bash
 # Clone
 git clone https://github.com/hashwnath/palantir-ontology-agents.git
@@ -70,8 +92,10 @@ cd palantir-ontology-agents
 pip install -r requirements.txt
 
 # Set API keys (optional -- demo mode works without them)
-export TAVILY_API_KEY=your_tavily_key        # for live OSINT web search
-export ANTHROPIC_API_KEY=your_anthropic_key  # for LLM-powered features
+export TAVILY_API_KEY=your_tavily_key                    # for live OSINT web search
+export OPENAI_API_KEY=your_openai_compatible_key         # for LLM-powered features
+export OPENAI_BASE_URL=https://api.openai.com/v1         # OpenAI-compatible base URL
+export OPENAI_MODEL=gpt-4o-mini                          # model name on that endpoint
 
 # Run the Streamlit demo
 streamlit run src/ui/app.py
@@ -149,7 +173,7 @@ This project draws structural inspiration from:
 ## Tech Stack
 
 - **LangGraph** -- StateGraph workflow with parallel branching
-- **LangChain + Claude** -- claude-sonnet-4-20250514 for agent reasoning
+- **LangChain + ChatOpenAI** -- OpenAI-compatible API for agent reasoning
 - **Tavily** -- Real-time web search for OSINT
 - **Streamlit** -- Interactive demo UI
 - **Python dataclasses** -- Typed ontology schema

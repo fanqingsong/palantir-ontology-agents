@@ -19,15 +19,22 @@ class Orchestrator:
     -> sequential agents -> briefing output.
     """
 
-    def __init__(self, model_name: str = "claude-sonnet-4-20250514", api_key: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         """Initialize the orchestrator.
 
         Args:
-            model_name: Anthropic model to use (default: claude-sonnet-4-20250514).
-            api_key: Optional Anthropic API key. Falls back to ANTHROPIC_API_KEY env var.
+            model_name: OpenAI-compatible model name. Falls back to OPENAI_MODEL, then gpt-4o-mini.
+            api_key: API key. Falls back to OPENAI_API_KEY.
+            base_url: Compatible API base URL. Falls back to OPENAI_BASE_URL or OPENAI_API_BASE.
         """
-        self.model_name = model_name
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
+        self.model_name = model_name or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
         self._workflow = None
         self._llm = None
 
@@ -36,13 +43,16 @@ class Orchestrator:
         """Lazily initialize the LLM."""
         if self._llm is None and self.api_key:
             try:
-                from langchain_anthropic import ChatAnthropic
-                self._llm = ChatAnthropic(
-                    model=self.model_name,
-                    api_key=self.api_key,
-                    temperature=0,
-                    max_tokens=4096,
-                )
+                from langchain_openai import ChatOpenAI
+                kwargs: dict[str, Any] = {
+                    "model": self.model_name,
+                    "api_key": self.api_key,
+                    "temperature": 0,
+                    "max_tokens": 4096,
+                }
+                if self.base_url:
+                    kwargs["base_url"] = self.base_url
+                self._llm = ChatOpenAI(**kwargs)
             except Exception:
                 self._llm = None
         return self._llm

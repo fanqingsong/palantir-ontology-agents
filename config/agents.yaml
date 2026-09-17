@@ -4,7 +4,7 @@
 coordinator:
   name: "Coordinator Agent"
   role: "Routes queries to specialist agents, manages ontology state"
-  model: "claude-sonnet-4-20250514"
+  model: "gpt-4o-mini"
   temperature: 0
   max_tokens: 2048
   tools:
@@ -15,7 +15,7 @@ coordinator:
 osint_collector:
   name: "OSINT Collector"
   role: "Collects open-source intelligence via web search"
-  model: "claude-sonnet-4-20250514"
+  model: "gpt-4o-mini"
   temperature: 0
   max_tokens: 4096
   tools:
@@ -27,7 +27,7 @@ osint_collector:
 graph_analyst:
   name: "Graph Analyst"
   role: "Analyzes ontology graph for patterns and relationships"
-  model: "claude-sonnet-4-20250514"
+  model: "gpt-4o-mini"
   temperature: 0
   max_tokens: 4096
   tools:
@@ -40,7 +40,7 @@ graph_analyst:
 threat_assessor:
   name: "Threat Assessor"
   role: "Assesses threats, assigns risk scores"
-  model: "claude-sonnet-4-20250514"
+  model: "gpt-4o-mini"
   temperature: 0
   max_tokens: 4096
   tools:
@@ -58,7 +58,7 @@ threat_assessor:
 briefing_drafter:
   name: "Briefing Drafter"
   role: "Generates executive briefings from agent results"
-  model: "claude-sonnet-4-20250514"
+  model: "gpt-4o-mini"
   temperature: 0.3
   max_tokens: 8192
   tools:

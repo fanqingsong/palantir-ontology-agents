@@ -8,13 +8,14 @@ from src.orchestrator import Orchestrator
 class TestOrchestrator:
     """Test the orchestrator initialization and execution."""
 
-    def test_init_default(self):
+    def test_init_default(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_MODEL", raising=False)
         orch = Orchestrator()
-        assert orch.model_name == "claude-sonnet-4-20250514"
+        assert orch.model_name == "gpt-4o-mini"
 
     def test_init_custom_model(self):
-        orch = Orchestrator(model_name="claude-opus-4-20250514")
-        assert orch.model_name == "claude-opus-4-20250514"
+        orch = Orchestrator(model_name="gpt-4o")
+        assert orch.model_name == "gpt-4o"
 
     def test_workflow_builds(self):
         orch = Orchestrator()
