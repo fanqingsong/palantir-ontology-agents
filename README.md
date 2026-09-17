@@ -8,6 +8,42 @@ A working multi-agent system built with LangGraph that demonstrates how speciali
 
 **Demo scenario**: 4 agents analyze a Taiwan Strait supply chain disruption, traverse a 50-entity ontology graph, assess threats, and deliver an executive briefing in under 2 minutes.
 
+## What that sentence means
+
+Palantir AIP is not "several chatbots." Agents share one typed object graph and hand off structured state. This repo is a runnable sketch of that pattern.
+
+| Clause | Meaning here |
+|--------|----------------|
+| **A working multi-agent system** | An executable path, not a slide: shared state, real nodes, a briefing at the end. Four specialists, 50+ entities, 100+ edges. |
+| **built with LangGraph** | A `StateGraph` decides order and fan-out: Coordinator, then OSINT ∥ Graph Analyst, then Threat Assessor, then Briefing Drafter. |
+| **coordinate over an ontology-structured data layer** | Agents query typed entities and labeled edges (SUPPLIES, DEPENDS_ON, THREATENS), not a pile of unaligned web pages. |
+| **produce actionable intelligence** | Exposure scores, threat assessment, and an executive briefing — not another news recap. |
+
+Two layers, one pipeline:
+
+```text
+Orchestration (LangGraph)     Data (Ontology Store)
+  who runs, in what order       typed objects + semantic edges
+  src/graph/workflow.py         src/ontology/
+```
+
+```mermaid
+flowchart LR
+  Apple -->|DEPENDS_ON| TSMC
+  ASML -->|SUPPLIES| TSMC
+  TSMC -->|OPERATES_IN| KaohsiungPort
+  PLA_Navy -->|THREATENS| KaohsiungPort
+  Blockade -->|THREATENS| KaohsiungPort
+```
+
+Read the graph: Apple depends on TSMC; ASML supplies TSMC; TSMC ships through Kaohsiung; navy and a strait blockade both threaten that port. Exposure walks upstream along `DEPENDS_ON`.
+
+| Question | LLM + web pages | Agents on an ontology |
+|----------|-----------------|------------------------|
+| Is Apple hit by a port blockade? | Model guesses from memory or retrieved paragraphs | Walk `DEPENDS_ON` / `OPERATES_IN`; the score is reproducible |
+| How do agents name the same company? | Separate summaries; "TSMC" vs "台积电" may never join | Shared entity IDs and edges |
+| What is the output? | Fluent text that is hard to audit | Graph evidence + threat score + structured briefing |
+
 ## Demo
 
 ![Demo](docs/demo.gif)
@@ -43,6 +79,148 @@ graph TD
 ```
 
 **Green** = Live (working code) | **Yellow** = Scaffolded (mock data, clean integration points)
+
+Orchestration is the LangGraph path above. The **Ontology Store** is the shared data layer both live collectors write to and Graph Analyst traverses — not a private JSON blob per agent.
+
+The two live specialists use that graph differently: OSINT **aligns** open-source text onto canonical IDs (and writes a few new events); Graph Analyst **reads** the same typed edges to compute chains, hubs, and exposure.
+
+## How OSINT and Graph Analyst use the ontology
+
+```text
+Query
+  ├─ OSINT Collector     web text ──match──► canonical IDs ──write──► new EVENT nodes
+  │                      co-occurrence ──► RELATED_TO (result payload only)
+  └─ Graph Analyst       keywords ──► focus nodes ──traverse / path / degree / exposure──► findings
+```
+
+```mermaid
+flowchart TB
+  subgraph OSINT["OSINT Collector — align + light write"]
+    direction TB
+    W[Web search] --> X[Keyword extract]
+    X --> A["store.get_entity(id) → canonical name"]
+    X --> R[Co-occurrence RELATED_TO]
+    F[Key findings] --> D["store.search() de-dupe"]
+    D --> E["add_entity(EVENT)"]
+  end
+
+  subgraph GA["Graph Analyst — read-only graph ops"]
+    direction TB
+    K[Query keywords] --> FO["get_entity — focus nodes"]
+    FO --> C["DEPENDS_ON / SUPPLIES chains"]
+    FO --> P["BFS shortest path vs threats"]
+    FO --> H["degree = |neighbors|"]
+    FO --> S["exposure from hop distance"]
+  end
+
+  ONT[(Ontology Store<br/>typed entities + labeled edges)]
+  A --> ONT
+  E --> ONT
+  ONT --> FO
+  ONT --> C
+  ONT --> P
+  ONT --> H
+  ONT --> S
+
+  style OSINT fill:#e8f5e9,stroke:#333
+  style GA fill:#e3f2fd,stroke:#333
+  style ONT fill:#90EE90,stroke:#333
+```
+
+| Agent | Ontology role | Writes the store? |
+|-------|---------------|-------------------|
+| **OSINT Collector** | Dictionary of known IDs (`tsmc`, `taiwan_strait`, …) plus a place to append OSINT events | Yes — new `EVENT` nodes only |
+| **Graph Analyst** | The analysis object: traversal, supply-chain chains, hubs, exposure | No |
+
+### OSINT Collector: dictionary, then a few events
+
+Pipeline in `src/agents/osint_agent.py`: search → extract entities → key findings → infer relationships → optional store update.
+
+`ENTITY_PATTERNS` maps phrases in titles/snippets onto **fixed ontology IDs**. If the store already has that ID, the agent uses the official `name` so "Taiwan Semiconductor" and "TSMC" collapse to one object:
+
+```mermaid
+flowchart LR
+  T1["'TSMC'"] --> ID((tsmc))
+  T2["'Taiwan Semiconductor'"] --> ID
+  ID --> N["store.get_entity('tsmc').name → TSMC"]
+```
+
+Same-article co-mentions become `RELATED_TO` edges with confidence `score * 0.8`. Those edges land in `OSINTResult.new_relationships`; they are **not** `add_relationship`'d into the store.
+
+What *does* get written: each key finding is searched with `store.search(finding[:30])`. On a miss, a new `EntityType.EVENT` is added (`source="osint_agent"`, `confidence=0.7`). Existing orgs, ports, and threats are not mutated.
+
+```mermaid
+sequenceDiagram
+  participant Web as Search results
+  participant Pat as ENTITY_PATTERNS
+  participant Store as OntologyStore
+  participant Out as OSINTResult
+
+  Web->>Pat: title + snippet
+  Pat->>Store: get_entity(canonical id)
+  Store-->>Out: extracted_entities (aligned names)
+  Pat->>Out: RELATED_TO from co-occurrence
+  Web->>Store: search(finding) then maybe add_entity(EVENT)
+```
+
+### Graph Analyst: the graph *is* the analysis
+
+Without a store, `run()` returns immediately (`"No ontology store available"`). With one, `src/agents/graph_agent.py` plus `src/tools/ontology_tools.py` do seven read-only steps:
+
+```mermaid
+flowchart LR
+  Q[Query] --> F[Focus IDs]
+  F --> DC[Dependency chains]
+  F --> EX[Exposure report]
+  F --> CP[Critical paths]
+  F --> HB[Hubs]
+  F --> TR[3-hop traversal stats]
+  DC --> KF[Key findings]
+  EX --> KF
+  CP --> KF
+  HB --> KF
+  TR --> KF
+```
+
+| Step | Store / tool API | What it means on the graph |
+|------|------------------|----------------------------|
+| Focus entities | `get_entity(id)` | Keywords map to `tsmc`, `taiwan_strait`, `uspacflt`, …; default to those three if nothing matches |
+| Dependency chains | `get_dependency_chains` | Follow **outgoing** `DEPENDS_ON` / `SUPPLIES` / `SUPPLIES_TO`, max depth 5 |
+| Exposure | `query_by_type(ORGANIZATION)` + `calculate_exposure_score` | BFS to nearest `THREAT`; score `max(0, 1.0 − (hops − 1) × 0.2)` |
+| Critical paths | `query_by_type(THREAT)` + `find_path` (BFS, max 5 hops) | Shortest paths among focus ∪ threats; keep 20 shortest |
+| Hubs | `all_entities()` + `get_neighbors` | Degree centrality, top 10 |
+| Stats | `traverse(..., hops=3)` | Reachable size from each focus node |
+| Findings | (derived) | Most-connected node, high exposure, longest chain, ≤2-hop threat paths |
+
+Exposure is hop distance, not an LLM guess:
+
+```mermaid
+flowchart LR
+  Apple -->|1 hop| TSMC
+  TSMC -->|2 hops| Port
+  Port -->|3 hops| Blockade[[THREAT]]
+
+  Apple -.->|score 0.6| Blockade
+```
+
+1 hop ≈ **1.0**, each extra hop minus **0.2**. Graph Analyst does not write edges; the `llm` constructor argument is unused.
+
+### Same query, two graphs (demo caveat)
+
+Coordinator, OSINT, and Graph Analyst each call `load_sample_data()`. LangGraph runs OSINT ∥ Graph Analyst in parallel, so each node gets **its own copy**. OSINT's new `EVENT` nodes do not appear in Graph Analyst's traversal in the same run.
+
+```mermaid
+flowchart TB
+  C[Coordinator] -->|fresh sample| S1[(store copy)]
+  C --> O[OSINT]
+  C --> G[Graph Analyst]
+  O -->|fresh sample| S2[(store copy)]
+  G -->|fresh sample| S3[(store copy)]
+  S2 -.->|events stay here| O
+  S3 --> G
+```
+
+Downstream Threat Assessor / Briefing Drafter consume **serialized results** (`osint_results`, `graph_results`), not a merged live graph.
 
 ## Live vs Blueprint
 
@@ -126,12 +304,14 @@ The system analyzes a realistic geopolitical scenario:
 
 ## Ontology
 
-The typed ontology layer supports:
+The typed ontology layer is what agents coordinate *over*. It is not a document store:
 
 - **Entity types**: Organization, Person, Location, Event, Asset, Threat
 - **Relationship types**: OPERATES_IN, SUPPLIES, THREATENS, DEPENDS_ON, DEPLOYED_AT, MONITORS, and 13 more
 - **Graph traversal**: N-hop queries, dependency chain discovery, exposure scoring
 - **BFS shortest path**: Find connections between any two entities
+
+That is why a question like "does a Kaohsiung blockade hit Apple?" is answered by walking the graph in the [example above](#what-that-sentence-means), not by hoping the model remembers a supply-chain article. How the two live agents actually read and write this layer is in [How OSINT and Graph Analyst use the ontology](#how-osint-and-graph-analyst-use-the-ontology).
 
 ## Project Structure
 
