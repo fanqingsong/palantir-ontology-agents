@@ -89,7 +89,7 @@ The two live specialists use that graph differently: OSINT **aligns** open-sourc
 
 ```text
 Query
-  ├─ OSINT Collector     web text ──match──► canonical IDs ──write──► EVENT nodes
+  ├─ OSINT Collector     web text ──schema──► types/attrs/rels ──match──► canonical IDs
   │                      co-occurrence ──► RELATED_TO ──write──► store
   └─ Graph Analyst       keywords ──► focus nodes ──traverse / path / degree / exposure──► findings
 ```
@@ -98,9 +98,9 @@ Query
 flowchart TB
   subgraph OSINT["OSINT Collector — align + light write"]
     direction TB
-    W[Web search] --> X[Keyword extract]
+    W[Web search] --> X[Schema-constrained extract]
     X --> A["store.get_entity(id) → canonical name"]
-    X --> R[Co-occurrence RELATED_TO]
+    X --> R[Schema relationship types]
     F[Key findings] --> D["store.search() de-dupe"]
     D --> E["add_entity(EVENT)"]
   end
@@ -131,14 +131,16 @@ flowchart TB
 
 | Agent | Ontology role | Writes the store? |
 |-------|---------------|-------------------|
-| **OSINT Collector** | Dictionary of known IDs (`tsmc`, `taiwan_strait`, …) plus a place to append OSINT events and co-occurrence edges | Yes — new `EVENT` nodes and `RELATED_TO` edges |
+| **OSINT Collector** | Align mentions to schema types in `ontology_schema.yaml` and canonical store IDs; append new typed objects plus schema-valid edges | Yes — new entities (including `EVENT` findings) and schema relationships |
 | **Graph Analyst** | The analysis object: traversal, supply-chain chains, hubs, exposure | No |
 
-### OSINT Collector: dictionary, then a few events
+### OSINT Collector: schema, then a few writes
 
-Pipeline in `src/agents/osint_agent.py`: search → extract entities → key findings → infer relationships → optional store update.
+Pipeline in `src/agents/osint_agent.py`: search → match schema-valid store instances → optional LLM JSON extract against `config/ontology_schema.yaml` → key findings → infer relationships → store update.
 
-`ENTITY_PATTERNS` maps phrases in titles/snippets onto **fixed ontology IDs**. If the store already has that ID, the agent uses the official `name` so "Taiwan Semiconductor" and "TSMC" collapse to one object:
+Extraction is constrained by the YAML schema (entity types, attributes, relationship types). Mentions resolve to canonical IDs already in the store (`TSMC` / `Taiwan Semiconductor` → `tsmc`) when the instance exists; unknown schema types are dropped. Same-article co-mentions become `RELATED_TO` (a schema relationship). The LLM may emit more specific types such as `DEPENDS_ON` or `THREATENS`; invalid types fall back to `RELATED_TO`.
+
+If the store already has that ID, the agent keeps the official `name` so "Taiwan Semiconductor" and "TSMC" collapse to one object:
 
 ```mermaid
 flowchart LR
@@ -154,14 +156,16 @@ Each key finding is searched with `store.search(finding[:30])`. On a miss, a new
 ```mermaid
 sequenceDiagram
   participant Web as Search results
-  participant Pat as ENTITY_PATTERNS
+  participant Schema as ontology_schema.yaml
+  participant Gaz as Store gazetteer
   participant Store as OntologyStore
   participant Out as OSINTResult
 
-  Web->>Pat: title + snippet
-  Pat->>Store: get_entity(canonical id)
+  Web->>Schema: constrain types / attributes / rels
+  Schema->>Gaz: instances whose types are in schema
+  Gaz->>Store: get_entity(canonical id)
   Store-->>Out: extracted_entities (aligned names)
-  Pat->>Store: add_relationship RELATED_TO
+  Schema->>Store: add_relationship (schema-valid type)
   Store-->>Out: new_relationships
   Web->>Store: search(finding) then maybe add_entity(EVENT)
 ```

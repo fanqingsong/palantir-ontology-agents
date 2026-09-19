@@ -14,13 +14,12 @@ Collect open-source intelligence from web sources, extract structured entities, 
 6. Summarize key findings with source attribution
 
 ## Entity Extraction
-For each search result, identify:
-- **Organizations**: Companies, government bodies, military units
-- **Persons**: Key decision-makers, commanders, executives
-- **Locations**: Ports, cities, bases, waterways
-- **Events**: Exercises, incidents, diplomatic actions
-- **Assets**: Ships, aircraft, facilities
-- **Threats**: Military actions, cyber attacks, economic measures
+Extract only types and relationships defined in `config/ontology_schema.yaml`.
+The runtime prompt includes that schema; do not invent entity types, relationship types, or attribute values outside it.
+
+Prefer canonical IDs from the ontology catalog when a mention is the same object
+(for example "Taiwan Semiconductor" → `tsmc`). Fill type-specific attributes only
+when the value matches the schema (enums, ranges). Unknown types must be dropped.
 
 ## Output Format
 Provide structured OSINT findings with:

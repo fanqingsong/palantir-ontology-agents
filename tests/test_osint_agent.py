@@ -81,3 +81,61 @@ class TestOSINTAgent:
             assert sample_ontology_store.relationship_count >= before
             written = [rel for rel in result.new_relationships if sample_ontology_store.get_relationship(f"osint_{rel['source']}_{rel['target']}")]
             assert written
+
+    def test_drops_entity_types_outside_schema(self, sample_ontology_store, mock_llm):
+        mock_llm.invoke.return_value.content = """
+        {"entities": [
+            {"name": "TSMC", "type": "organization", "canonical_id": "tsmc",
+             "attributes": {"org_type": "corporation", "country": "Taiwan", "foo": "nope"}},
+            {"name": "Death Star", "type": "spaceship"}
+        ], "relationships": [
+            {"source": "tsmc", "target": "taiwan_strait", "type": "DEPENDS_ON"},
+            {"source": "tsmc", "target": "taiwan_strait", "type": "HUGS"}
+        ]}
+        """
+        agent = OSINTAgent(ontology_store=sample_ontology_store, llm=mock_llm)
+        from src.tools.web_search import SearchResult
+        results = [
+            SearchResult(
+                title="TSMC production update",
+                url="http://test.com",
+                content="TSMC in Taiwan Strait region faces challenges.",
+                score=0.9,
+            )
+        ]
+        entities, relationships = agent._extract_with_schema(results)
+        types = {e["type"] for e in entities}
+        ids = {e["id"] for e in entities}
+        assert "spaceship" not in types
+        assert "tsmc" in ids
+        tsmc = next(e for e in entities if e["id"] == "tsmc")
+        assert tsmc["attributes"]["org_type"] == "corporation"
+        assert "foo" not in tsmc["attributes"]
+        rel_types = {r["type"] for r in relationships}
+        assert "DEPENDS_ON" in rel_types
+        assert "HUGS" not in rel_types
+        assert "RELATED_TO" in rel_types
+
+    def test_writes_schema_typed_relationship(self, sample_ontology_store, mock_llm):
+        mock_llm.invoke.side_effect = [
+            type("Msg", (), {"content": "taiwan strait blockade shipping\nTSMC supply chain delay\nPLA navy western pacific"})(),
+            type("Msg", (), {"content": '{"entities":[{"name":"TSMC","type":"organization","canonical_id":"tsmc"}],"relationships":[{"source":"tsmc","target":"taiwan_strait","type":"DEPENDS_ON","confidence":0.9}]}'})(),
+            type("Msg", (), {"content": "PLA launched Joint Sword exercises around Taiwan disrupting Kaohsiung port traffic."})(),
+        ]
+        agent = OSINTAgent(ontology_store=sample_ontology_store, llm=mock_llm)
+        result = agent.run("Taiwan Strait supply chain disruption")
+        assert sample_ontology_store.get_relationship("osint_tsmc_taiwan_strait_DEPENDS_ON")
+
+    def test_gazetteer_uses_store_instances_not_hardcoded_aliases(self, minimal_store):
+        from src.tools.web_search import SearchResult
+        agent = OSINTAgent(ontology_store=minimal_store)
+        results = [
+            SearchResult(
+                title="Test Org at Test Port",
+                url="http://example.com",
+                content="Test Org operates Test Port under Test Threat pressure.",
+                score=0.91,
+            )
+        ]
+        ids = {e["id"] for e in agent._extract_entities(results)}
+        assert ids == {"org1", "loc1", "threat1"}
