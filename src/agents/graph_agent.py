@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-from src.ontology.schema import EntityType, RelationshipType
+from src.ontology.schema_def import OntologySchema, instance_gazetteer, load_ontology_schema
 from src.ontology.store import OntologyStore
 from src.tools.ontology_tools import (
     find_dependency_chains,
@@ -52,9 +52,15 @@ class GraphAnalystAgent:
     exposure to threats, identify critical paths and hub entities.
     """
 
-    def __init__(self, ontology_store: Optional[OntologyStore] = None, llm: Any = None):
+    def __init__(
+        self,
+        ontology_store: Optional[OntologyStore] = None,
+        llm: Any = None,
+        schema: Optional[OntologySchema] = None,
+    ):
         self.store = ontology_store
         self.llm = llm
+        self.schema = schema or load_ontology_schema()
 
     def run(self, query: str) -> GraphAnalysisResult:
         """Execute graph analysis for a given query.
@@ -75,11 +81,19 @@ class GraphAnalystAgent:
 
         # Step 2: Find dependency chains
         for eid in key_entity_ids:
-            chains = find_dependency_chains(self.store, eid, max_depth=5)
+            chains = find_dependency_chains(
+                self.store,
+                eid,
+                max_depth=5,
+                rel_types=self.schema.dependency_rel_enums(),
+            )
             result.dependency_chains.extend(chains)
 
-        # Step 3: Calculate exposure scores
-        result.exposure_scores = get_exposure_report(self.store)
+        result.exposure_scores = get_exposure_report(
+            self.store,
+            entity_types=self.schema.exposure_enums(),
+            threat_entity_type=self.schema.threat_enum(),
+        )
 
         # Step 4: Find critical paths between key entities
         result.critical_paths = self._find_critical_paths(key_entity_ids)
@@ -96,39 +110,24 @@ class GraphAnalystAgent:
         return result
 
     def _identify_focus_entities(self, query: str) -> list[str]:
-        """Identify which entities to focus analysis on based on the query."""
-        focus_ids: list[str] = []
+        """Focus on schema-valid store instances mentioned in the query."""
         query_lower = query.lower()
+        focus_ids: list[str] = []
+        for pattern, entity_id, _etype in instance_gazetteer(self.store, self.schema):
+            if pattern in query_lower and entity_id not in focus_ids:
+                focus_ids.append(entity_id)
+        if focus_ids:
+            return focus_ids[:8]
+        return self._default_focus_ids()
 
-        # Keyword-based entity selection
-        keyword_map = {
-            "tsmc": "tsmc",
-            "semiconductor": "tsmc",
-            "chip": "tsmc",
-            "supply chain": "tsmc",
-            "apple": "apple",
-            "nvidia": "nvidia",
-            "shipping": "maersk",
-            "taiwan": "taiwan_strait",
-            "strait": "taiwan_strait",
-            "military": "uspacflt",
-            "navy": "uspacflt",
-            "pla": "pla_navy",
-            "blockade": "strait_blockade",
-            "threat": "strait_blockade",
-        }
-
-        for keyword, entity_id in keyword_map.items():
-            if keyword in query_lower and entity_id not in focus_ids:
-                entity = self.store.get_entity(entity_id)
-                if entity:
-                    focus_ids.append(entity_id)
-
-        # Default to major entities if no keyword match
-        if not focus_ids:
-            focus_ids = ["tsmc", "taiwan_strait", "uspacflt"]
-
-        return focus_ids
+    def _default_focus_ids(self, limit: int = 3) -> list[str]:
+        ranked: list[tuple[int, str]] = []
+        for entity in self.store.all_entities():
+            if not self.schema.is_entity_type(entity.entity_type.value):
+                continue
+            ranked.append((len(self.store.get_neighbors(entity.id)), entity.id))
+        ranked.sort(reverse=True)
+        return [entity_id for _degree, entity_id in ranked[:limit]]
 
     def _find_critical_paths(self, entity_ids: list[str]) -> list[dict[str, Any]]:
         """Find shortest paths between all pairs of focus entities."""
@@ -136,7 +135,9 @@ class GraphAnalystAgent:
         seen: set[tuple[str, str]] = set()
 
         # Also include threats
-        threat_ids = [e.id for e in self.store.query_by_type(EntityType.THREAT)]
+        threat_ids = [
+            e.id for e in self.store.query_by_type(self.schema.threat_enum())
+        ]
         all_ids = list(set(entity_ids + threat_ids))
 
         for i, src in enumerate(all_ids):
@@ -165,6 +166,8 @@ class GraphAnalystAgent:
         """Find entities with highest connectivity (degree centrality)."""
         degree_counts: dict[str, int] = {}
         for entity in self.store.all_entities():
+            if not self.schema.is_entity_type(entity.entity_type.value):
+                continue
             neighbors = self.store.get_neighbors(entity.id)
             degree_counts[entity.id] = len(neighbors)
 
@@ -215,7 +218,7 @@ class GraphAnalystAgent:
             ]
             raw = invoke_llm(
                 self.llm,
-                load_prompt("graph_analyst"),
+                load_prompt("graph_analyst") + "\n\n" + self.schema.analysis_prompt_block(),
                 "Write up to 5 actionable intelligence findings from this graph analysis. "
                 "Return one finding per line.\n\n"
                 f"Query: {result.query}\n"

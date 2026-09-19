@@ -35,12 +35,24 @@ class OntologySchema:
     entity_types: dict[str, EntityTypeSpec]
     relationship_types: frozenset[str]
     base_attributes: tuple[AttributeSpec, ...]
+    dependency_relationship_types: tuple[str, ...]
+    threat_entity_type: str
+    exposure_entity_types: tuple[str, ...]
 
     def is_entity_type(self, name: str) -> bool:
         return (name or "").strip().lower() in self.entity_types
 
     def is_relationship_type(self, name: str) -> bool:
         return (name or "").strip().upper() in self.relationship_types
+
+    def dependency_rel_enums(self) -> list[RelationshipType]:
+        return [RelationshipType(name) for name in self.dependency_relationship_types]
+
+    def threat_enum(self) -> EntityType:
+        return EntityType(self.threat_entity_type)
+
+    def exposure_enums(self) -> list[EntityType]:
+        return [EntityType(name) for name in self.exposure_entity_types]
 
     def coerce_relationship_type(self, name: str) -> Optional[str]:
         rel = (name or "").strip().upper()
@@ -82,6 +94,39 @@ class OntologySchema:
         lines.append(", ".join(sorted(self.relationship_types)))
         return "\n".join(lines)
 
+    def analysis_prompt_block(self) -> str:
+        return (
+            f"{self.prompt_block()}\n\n"
+            "### Graph analysis\n"
+            f"- Dependency edges (outgoing): {', '.join(self.dependency_relationship_types)}\n"
+            f"- Threat entity type: {self.threat_entity_type}\n"
+            f"- Exposure entity types: {', '.join(self.exposure_entity_types)}\n"
+        )
+
+
+def instance_gazetteer(store: Any, schema: OntologySchema) -> list[tuple[str, str, str]]:
+    """(pattern, entity_id, entity_type) from schema-valid store instances."""
+    if store is None:
+        return []
+    entries: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for entity in store.all_entities():
+        etype = entity.entity_type.value
+        if not schema.is_entity_type(etype):
+            continue
+        candidates = {entity.id, entity.name, entity.id.replace("_", " ")}
+        for raw in candidates:
+            pattern = raw.strip().lower()
+            if len(pattern) < 3:
+                continue
+            key = (pattern, entity.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append((pattern, entity.id, etype))
+    entries.sort(key=lambda item: len(item[0]), reverse=True)
+    return entries
+
 
 def _parse_attribute(item: dict[str, Any]) -> AttributeSpec:
     raw_range = item.get("range")
@@ -121,7 +166,7 @@ def _coerce_value(attr: AttributeSpec, value: Any) -> Any:
     return text
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=8)
 def load_ontology_schema(path: str | Path | None = None) -> OntologySchema:
     schema_path = Path(path) if path else _SCHEMA_PATH
     payload = yaml.safe_load(schema_path.read_text(encoding="utf-8")) or {}
@@ -148,8 +193,51 @@ def load_ontology_schema(path: str | Path | None = None) -> OntologySchema:
     )
     if not entity_types or not relationship_types:
         raise ValueError(f"Invalid ontology schema: {schema_path}")
+
+    analysis = payload.get("graph_analysis") or {}
+    dependency_relationship_types = _subset_rel_types(
+        analysis.get("dependency_relationship_types")
+        or ["DEPENDS_ON", "SUPPLIES", "SUPPLIES_TO"],
+        relationship_types,
+        "graph_analysis.dependency_relationship_types",
+    )
+    threat_entity_type = str(analysis.get("threat_entity_type") or "threat").strip().lower()
+    if threat_entity_type not in entity_types:
+        raise ValueError(
+            f"graph_analysis.threat_entity_type {threat_entity_type!r} is not an entity type"
+        )
+    exposure_raw = analysis.get("exposure_entity_types") or ["organization"]
+    exposure_entity_types = tuple(
+        _require_entity_type(name, entity_types, "graph_analysis.exposure_entity_types")
+        for name in exposure_raw
+    )
+
     return OntologySchema(
         entity_types=entity_types,
         relationship_types=frozenset(relationship_types),
         base_attributes=base_attributes,
+        dependency_relationship_types=dependency_relationship_types,
+        threat_entity_type=threat_entity_type,
+        exposure_entity_types=exposure_entity_types,
     )
+
+
+def _subset_rel_types(raw: list[Any], allowed: list[str], label: str) -> tuple[str, ...]:
+    allowed_set = set(allowed)
+    selected: list[str] = []
+    for item in raw:
+        name = str(item).strip().upper()
+        if name not in allowed_set:
+            raise ValueError(f"{label} contains unknown relationship type {name!r}")
+        if name not in selected:
+            selected.append(name)
+    if not selected:
+        raise ValueError(f"{label} must list at least one relationship type")
+    return tuple(selected)
+
+
+def _require_entity_type(name: Any, entity_types: dict[str, EntityTypeSpec], label: str) -> str:
+    key = str(name).strip().lower()
+    if key not in entity_types:
+        raise ValueError(f"{label} contains unknown entity type {key!r}")
+    return key

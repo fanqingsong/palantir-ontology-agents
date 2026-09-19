@@ -55,3 +55,33 @@ class TestOntologySchemaDef:
         schema = load_ontology_schema()
         assert schema.coerce_relationship_type("HUGS") == "RELATED_TO"
         assert schema.coerce_relationship_type("depends_on") == "DEPENDS_ON"
+
+    def test_graph_analysis_block_is_schema_subset(self):
+        schema = load_ontology_schema()
+        assert schema.dependency_relationship_types == (
+            "DEPENDS_ON",
+            "SUPPLIES",
+            "SUPPLIES_TO",
+        )
+        assert schema.threat_entity_type == "threat"
+        assert schema.exposure_entity_types == ("organization",)
+        for rel in schema.dependency_relationship_types:
+            assert rel in schema.relationship_types
+        assert schema.threat_entity_type in schema.entity_types
+
+    def test_rejects_unknown_dependency_relationship(self, tmp_path):
+        from pathlib import Path
+        from src.ontology.schema_def import load_ontology_schema as load_schema
+
+        src = Path("config/ontology_schema.yaml").read_text(encoding="utf-8")
+        src = src.replace(
+            "  dependency_relationship_types:\n    - DEPENDS_ON\n    - SUPPLIES\n    - SUPPLIES_TO",
+            "  dependency_relationship_types:\n    - DEPENDS_ON\n    - SUPPLIES\n    - SUPPLIES_TO\n    - NOT_A_REL",
+        )
+        path = tmp_path / "bad_schema.yaml"
+        path.write_text(src, encoding="utf-8")
+        try:
+            load_schema(path)
+            raise AssertionError("expected ValueError")
+        except ValueError as exc:
+            assert "NOT_A_REL" in str(exc)

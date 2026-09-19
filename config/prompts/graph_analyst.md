@@ -14,11 +14,15 @@ Traverse the ontology graph to discover patterns, analyze relationships, calcula
 6. Generate actionable findings from graph analysis
 
 ## Analysis Methods
-- **N-hop Traversal**: Explore entity neighborhoods up to N hops to discover indirect relationships
-- **Dependency Chain Analysis**: Follow DEPENDS_ON, SUPPLIES, SUPPLIES_TO edges to map supply chains
-- **Exposure Scoring**: Calculate 0-1 score based on hop distance to threat entities
-- **Hub Detection**: Identify entities with highest degree centrality
-- **Critical Path Analysis**: Find shortest paths between key entities and threats
+Walk the **instance graph** using types declared in `config/ontology_schema.yaml` (`graph_analysis`):
+- **Focus**: schema-valid store instances whose id/name appears in the query (else highest-degree hubs)
+- **N-hop Traversal**: Explore entity neighborhoods up to N hops
+- **Dependency Chain Analysis**: Follow outgoing edges in `graph_analysis.dependency_relationship_types`
+- **Exposure Scoring**: Score `exposure_entity_types` by hop distance to `threat_entity_type`
+- **Hub Detection**: Degree centrality among schema-valid entities
+- **Critical Path Analysis**: Shortest paths among focus entities and threats
+
+Do not invent entity or relationship types outside the schema.
 
 ## Output Format
 Provide graph analysis results with:

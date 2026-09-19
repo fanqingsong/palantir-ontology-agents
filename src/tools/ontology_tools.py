@@ -66,19 +66,16 @@ def traverse_entity(store: OntologyStore, entity_id: str, hops: int = 2,
     return result
 
 
-def find_dependency_chains(store: OntologyStore, entity_id: str,
-                           max_depth: int = 5) -> list[list[dict[str, str]]]:
-    """Find supply chain / dependency chains from an entity.
-
-    Args:
-        store: The ontology store.
-        entity_id: Starting entity ID.
-        max_depth: Maximum chain length.
-
-    Returns:
-        List of chains, each chain is a list of {id, name} dicts.
-    """
-    chains = store.get_dependency_chains(entity_id, max_depth=max_depth)
+def find_dependency_chains(
+    store: OntologyStore,
+    entity_id: str,
+    max_depth: int = 5,
+    rel_types: Optional[list[RelationshipType]] = None,
+) -> list[list[dict[str, str]]]:
+    """Find supply chain / dependency chains from an entity."""
+    chains = store.get_dependency_chains(
+        entity_id, rel_types=rel_types, max_depth=max_depth
+    )
     named_chains = []
     for chain in chains:
         named_chain = []
@@ -89,25 +86,26 @@ def find_dependency_chains(store: OntologyStore, entity_id: str,
     return named_chains
 
 
-def get_exposure_report(store: OntologyStore, entity_ids: Optional[list[str]] = None) -> list[dict[str, Any]]:
-    """Calculate exposure scores for entities.
-
-    Args:
-        store: The ontology store.
-        entity_ids: Specific entity IDs to assess. If None, assesses all organizations.
-
-    Returns:
-        List of {entity_id, name, exposure_score} sorted by score descending.
-    """
+def get_exposure_report(
+    store: OntologyStore,
+    entity_ids: Optional[list[str]] = None,
+    entity_types: Optional[list[EntityType]] = None,
+    threat_entity_type: EntityType = EntityType.THREAT,
+) -> list[dict[str, Any]]:
+    """Calculate exposure scores for entities."""
     if entity_ids is None:
-        entities = store.query_by_type(EntityType.ORGANIZATION)
+        types = entity_types or [EntityType.ORGANIZATION]
+        entities = []
+        for entity_type in types:
+            entities.extend(store.query_by_type(entity_type))
         entity_ids = [e.id for e in entities]
 
+    threat_ids = [e.id for e in store.query_by_type(threat_entity_type)]
     report = []
     for eid in entity_ids:
         entity = store.get_entity(eid)
         if entity:
-            score = store.calculate_exposure_score(eid)
+            score = store.calculate_exposure_score(eid, threat_ids=threat_ids)
             report.append({
                 "entity_id": eid,
                 "name": entity.name,

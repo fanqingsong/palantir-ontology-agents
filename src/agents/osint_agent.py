@@ -128,26 +128,9 @@ class OSINTAgent:
 
     def _gazetteer(self) -> list[tuple[str, str, str]]:
         """(pattern, entity_id, entity_type) from schema-valid store instances."""
-        if not self.store:
-            return []
-        entries: list[tuple[str, str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for entity in self.store.all_entities():
-            etype = entity.entity_type.value
-            if not self.schema.is_entity_type(etype):
-                continue
-            candidates = {entity.id, entity.name, entity.id.replace("_", " ")}
-            for raw in candidates:
-                pattern = raw.strip().lower()
-                if len(pattern) < 3:
-                    continue
-                key = (pattern, entity.id)
-                if key in seen:
-                    continue
-                seen.add(key)
-                entries.append((pattern, entity.id, etype))
-        entries.sort(key=lambda item: len(item[0]), reverse=True)
-        return entries
+        from src.ontology.schema_def import instance_gazetteer
+
+        return instance_gazetteer(self.store, self.schema)
 
     def _extract_entities(self, results: list[SearchResult]) -> list[dict[str, Any]]:
         """Match search text against ontology instances whose types are in the schema."""

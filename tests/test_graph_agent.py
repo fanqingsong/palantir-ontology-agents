@@ -72,3 +72,16 @@ class TestGraphAnalystAgent:
         result = agent.run("Taiwan")
         assert isinstance(result, GraphAnalysisResult)
         assert "No ontology store available" in result.key_findings
+
+    def test_focus_entities_come_from_store_names(self, minimal_store):
+        agent = GraphAnalystAgent(ontology_store=minimal_store)
+        assert agent._identify_focus_entities("What about Test Org?") == ["org1"]
+
+    def test_default_focus_uses_hubs_not_hardcoded_ids(self, minimal_store):
+        agent = GraphAnalystAgent(ontology_store=minimal_store)
+        assert agent._identify_focus_entities("unrelated topic")[0] == "loc1"
+
+    def test_dependency_chains_use_schema_dependency_edges(self, minimal_store):
+        agent = GraphAnalystAgent(ontology_store=minimal_store)
+        result = agent.run("Test Org")
+        assert result.dependency_chains == []

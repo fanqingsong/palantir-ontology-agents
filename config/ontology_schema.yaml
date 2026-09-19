@@ -106,6 +106,16 @@ relationship_types:
   - SUPPLIES_TO
   - LOCATED_IN
 
+# How Graph Analyst walks the instance graph (must be subsets of the types above)
+graph_analysis:
+  dependency_relationship_types:
+    - DEPENDS_ON
+    - SUPPLIES
+    - SUPPLIES_TO
+  threat_entity_type: threat
+  exposure_entity_types:
+    - organization
+
 # Common attributes for all entities
 base_attributes:
   - name: id

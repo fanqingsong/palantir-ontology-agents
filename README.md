@@ -91,7 +91,7 @@ The two live specialists use that graph differently: OSINT **aligns** open-sourc
 Query
   ├─ OSINT Collector     web text ──schema──► types/attrs/rels ──match──► canonical IDs
   │                      co-occurrence ──► RELATED_TO ──write──► store
-  └─ Graph Analyst       keywords ──► focus nodes ──traverse / path / degree / exposure──► findings
+  └─ Graph Analyst       schema gazetteer ──► focus ──traverse / path / degree / exposure──► findings
 ```
 
 ```mermaid
@@ -107,8 +107,8 @@ flowchart TB
 
   subgraph GA["Graph Analyst — read-only graph ops"]
     direction TB
-    K[Query keywords] --> FO["get_entity — focus nodes"]
-    FO --> C["DEPENDS_ON / SUPPLIES chains"]
+    K[Schema gazetteer] --> FO["store instances — focus nodes"]
+    FO --> C["schema dependency edges"]
     FO --> P["BFS shortest path vs threats"]
     FO --> H["degree = |neighbors|"]
     FO --> S["exposure from hop distance"]
@@ -191,11 +191,11 @@ flowchart LR
 
 | Step | Store / tool API | What it means on the graph |
 |------|------------------|----------------------------|
-| Focus entities | `get_entity(id)` | Keywords map to `tsmc`, `taiwan_strait`, `uspacflt`, …; default to those three if nothing matches |
-| Dependency chains | `get_dependency_chains` | Follow **outgoing** `DEPENDS_ON` / `SUPPLIES` / `SUPPLIES_TO`, max depth 5 |
-| Exposure | `query_by_type(ORGANIZATION)` + `calculate_exposure_score` | BFS to nearest `THREAT`; score `max(0, 1.0 − (hops − 1) × 0.2)` |
-| Critical paths | `query_by_type(THREAT)` + `find_path` (max 5 hops) | Shortest paths among focus ∪ threats; keep 20 shortest (BFS, or Cypher on Neo4j) |
-| Hubs | `all_entities()` + `get_neighbors` | Degree centrality, top 10 |
+| Focus entities | gazetteer over schema-valid store instances | Query text matches id/name; otherwise top-degree hubs. No hardcoded `tsmc` map |
+| Dependency chains | `get_dependency_chains` | Outgoing edges listed in `graph_analysis.dependency_relationship_types` (`DEPENDS_ON` / `SUPPLIES` / `SUPPLIES_TO`), max depth 5 |
+| Exposure | `query_by_type(exposure_entity_types)` + `calculate_exposure_score` | BFS to nearest `threat_entity_type`; score `max(0, 1.0 − (hops − 1) × 0.2)` |
+| Critical paths | `query_by_type(threat)` + `find_path` (max 5 hops) | Shortest paths among focus ∪ threats; keep 20 shortest (BFS, or Cypher on Neo4j) |
+| Hubs | schema-valid `all_entities()` + `get_neighbors` | Degree centrality, top 10 |
 | Stats | `traverse(..., hops=3)` | Reachable size from each focus node |
 | Findings | (derived) | Most-connected node, high exposure, longest chain, ≤2-hop threat paths |
 
