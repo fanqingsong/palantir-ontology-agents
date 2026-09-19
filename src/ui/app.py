@@ -21,6 +21,7 @@ import streamlit as st
 
 from src.orchestrator import Orchestrator
 from src.ontology.factory import get_shared_store
+from src.agents.llm_support import MissingOpenAIKeyError
 
 
 # --- Page config ---
@@ -294,9 +295,22 @@ def main():
 
     query = st.text_area("Intelligence Query", value=default_query, height=100)
 
+    has_openai_key = bool(os.environ.get("OPENAI_API_KEY"))
+    if not has_openai_key:
+        st.sidebar.error("OPENAI_API_KEY is not set. Analysis is disabled.")
+        st.warning(
+            "Configure `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL` / `OPENAI_MODEL`) "
+            "in `.env`, then restart the app. Analysis will not run without an LLM key."
+        )
+
     col1, col2 = st.columns([1, 3])
     with col1:
-        run_button = st.button("Run Analysis", type="primary", use_container_width=True)
+        run_button = st.button(
+            "Run Analysis",
+            type="primary",
+            use_container_width=True,
+            disabled=not has_openai_key,
+        )
     with col2:
         show_graph = st.checkbox("Show Ontology Graph", value=False)
 
@@ -354,6 +368,9 @@ def main():
             progress_bar.progress(1.0)
             status_placeholder.success("Analysis complete!")
 
+        except MissingOpenAIKeyError as e:
+            status_placeholder.error(str(e))
+            return
         except Exception as e:
             status_placeholder.error(f"Workflow error: {e}")
             st.exception(e)
@@ -391,7 +408,10 @@ def main():
         with col4:
             st.metric("Threats", len(store.query_by_type(EntityType.THREAT)))
 
-        st.info("Click **Run Analysis** to start the multi-agent intelligence workflow.")
+        if has_openai_key:
+            st.info("Click **Run Analysis** to start the multi-agent intelligence workflow.")
+        else:
+            st.info("Set **OPENAI_API_KEY** in `.env` and restart the app to enable analysis.")
 
         # Architecture diagram
         st.markdown("### Workflow Architecture")

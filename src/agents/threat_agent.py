@@ -109,7 +109,7 @@ class ThreatAssessorAgent:
                 "confidence": ti.confidence,
                 "description": ti.description,
                 "indicators": ti.indicators,
-                "assessment": self._assess_individual_threat(ti, osint_result, graph_result),
+                "assessment": self._assess_individual_threat(ti, osint_result, graph_result, query),
             }
             result.threat_assessments.append(assessment)
 
@@ -141,8 +141,28 @@ class ThreatAssessorAgent:
 
     def _assess_individual_threat(self, ti: ThreatIntelligence,
                                    osint_result: Optional[OSINTResult],
-                                   graph_result: Optional[GraphAnalysisResult]) -> str:
+                                   graph_result: Optional[GraphAnalysisResult],
+                                   query: str = "") -> str:
         """Generate assessment text for an individual threat."""
+        if self.llm:
+            from src.agents.llm_support import invoke_llm, load_prompt
+            osint_bits = "; ".join((osint_result.key_findings[:3] if osint_result else []) or [])
+            graph_bits = "; ".join((graph_result.key_findings[:3] if graph_result else []) or [])
+            return invoke_llm(
+                self.llm,
+                load_prompt("threat_assessor"),
+                "Write a 2-4 sentence intelligence assessment for this threat. "
+                "Use IC confidence language.\n\n"
+                f"Query: {query}\n"
+                f"Category: {ti.category}\n"
+                f"Severity: {ti.severity}\n"
+                f"Confidence: {ti.confidence}\n"
+                f"Description: {ti.description}\n"
+                f"Indicators: {', '.join(ti.indicators)}\n"
+                f"OSINT: {osint_bits or 'n/a'}\n"
+                f"Graph: {graph_bits or 'n/a'}",
+            )
+
         assessments = {
             "military_buildup": (
                 "PLA force posture is consistent with coercive military signaling, with indicators "
@@ -209,6 +229,25 @@ class ThreatAssessorAgent:
 
     def _generate_findings(self, result: ThreatAssessmentResult) -> list[str]:
         """Generate key findings from the threat assessment."""
+        if self.llm:
+            from src.agents.llm_support import bullet_lines, invoke_llm, load_prompt
+            raw = invoke_llm(
+                self.llm,
+                load_prompt("threat_assessor"),
+                "Write up to 5 key findings for this threat assessment. "
+                "Return one finding per line.\n\n"
+                f"Query: {result.query}\n"
+                f"Risk level: {result.overall_risk_level}\n"
+                f"Risk score: {result.overall_risk_score}\n"
+                f"Confidence: {result.confidence}\n"
+                f"Threats: {', '.join(ta.get('category', '') for ta in result.threat_assessments)}\n"
+                f"Escalation indicators: {len(result.escalation_indicators)}\n"
+                f"Mitigating factors: {len(result.mitigating_factors)}",
+            )
+            findings = bullet_lines(raw, limit=8)
+            if findings:
+                return findings
+
         findings = [
             f"Overall risk level: {result.overall_risk_level} "
             f"(score: {result.overall_risk_score:.2f}, confidence: {result.confidence:.2f})",

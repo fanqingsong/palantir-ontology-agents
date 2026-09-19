@@ -97,10 +97,23 @@ class BriefingDrafterAgent:
         result.sections = sections
 
         # Generate the full document
-        result.briefing_text = generate_briefing_document(
-            subject=f"Intelligence Assessment: {query}",
-            **sections,
-        )
+        if self.llm:
+            from src.agents.llm_support import invoke_llm, load_prompt
+            section_blob = "\n\n".join(f"## {name}\n{body}" for name, body in sections.items())
+            result.briefing_text = invoke_llm(
+                self.llm,
+                load_prompt("briefing_drafter"),
+                "Draft the full executive intelligence briefing from this analysis. "
+                "Keep the standard IC section structure.\n\n"
+                f"Query: {query}\n\n{section_blob}",
+            )
+            generation_method = "llm"
+        else:
+            result.briefing_text = generate_briefing_document(
+                subject=f"Intelligence Assessment: {query}",
+                **sections,
+            )
+            generation_method = "template_with_agent_data"
 
         # Metadata
         result.metadata = {
@@ -109,7 +122,7 @@ class BriefingDrafterAgent:
             "threat_level": threat_result.overall_risk_level if threat_result else "UNKNOWN",
             "risk_score": threat_result.overall_risk_score if threat_result else 0.0,
             "confidence": threat_result.confidence if threat_result else 0.0,
-            "generation_method": "template_with_agent_data",
+            "generation_method": generation_method,
         }
 
         return result

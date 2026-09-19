@@ -57,6 +57,16 @@ class TestGraphAnalystAgent:
         assert "dependency_chains" in d
         assert "exposure_scores" in d
 
+    def test_llm_writes_findings(self, sample_ontology_store, mock_llm):
+        mock_llm.invoke.return_value.content = (
+            "TSMC is a single point of failure in the advanced semiconductor chain.\n"
+            "Taiwan Strait connectivity makes shipping disruption an immediate exposure."
+        )
+        agent = GraphAnalystAgent(ontology_store=sample_ontology_store, llm=mock_llm)
+        result = agent.run("Taiwan Strait supply chain")
+        assert mock_llm.invoke.called
+        assert any("TSMC" in finding or "Taiwan Strait" in finding for finding in result.key_findings)
+
     def test_runs_without_store(self):
         agent = GraphAnalystAgent()
         result = agent.run("Taiwan")

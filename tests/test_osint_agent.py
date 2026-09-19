@@ -61,6 +61,18 @@ class TestOSINTAgent:
         ids = [e["id"] for e in entities]
         assert "tsmc" in ids
 
+    def test_llm_generates_search_queries_and_findings(self, sample_ontology_store, mock_llm):
+        mock_llm.invoke.return_value.content = (
+            "taiwan strait blockade shipping\n"
+            "TSMC supply chain delay\n"
+            "PLA launched Joint Sword exercises around Taiwan disrupting Kaohsiung port traffic."
+        )
+        agent = OSINTAgent(ontology_store=sample_ontology_store, llm=mock_llm)
+        result = agent.run("Taiwan Strait supply chain disruption")
+        assert mock_llm.invoke.called
+        assert result.key_findings
+        assert any("Joint Sword" in finding or "taiwan" in finding.lower() for finding in result.key_findings)
+
     def test_writes_relationships_into_store(self, sample_ontology_store):
         before = sample_ontology_store.relationship_count
         agent = OSINTAgent(ontology_store=sample_ontology_store)

@@ -247,8 +247,8 @@ Downstream Threat Assessor / Briefing Drafter still consume **serialized results
 git clone https://github.com/hashwnath/palantir-ontology-agents.git
 cd palantir-ontology-agents
 
-# Optional: copy and fill API keys (demo mode works without them)
-# OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL for any OpenAI-compatible endpoint
+# Required for Run Analysis: OPENAI_API_KEY (OpenAI-compatible)
+# Optional: OPENAI_BASE_URL / OPENAI_MODEL / TAVILY_API_KEY
 cp .env.example .env
 
 docker compose up --build
@@ -295,9 +295,9 @@ cd palantir-ontology-agents
 # Install
 pip install -r requirements.txt
 
-# Set API keys (optional -- demo mode works without them)
-export TAVILY_API_KEY=your_tavily_key                    # for live OSINT web search
-export OPENAI_API_KEY=your_openai_compatible_key         # for LLM-powered features
+# OPENAI_API_KEY is required to run analysis
+export TAVILY_API_KEY=your_tavily_key                    # optional: live OSINT web search
+export OPENAI_API_KEY=your_openai_compatible_key         # required: LLM-powered analysis
 export OPENAI_BASE_URL=https://api.openai.com/v1         # OpenAI-compatible base URL
 export OPENAI_MODEL=gpt-4o-mini                          # model name on that endpoint
 

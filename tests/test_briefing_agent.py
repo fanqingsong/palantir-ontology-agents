@@ -77,3 +77,16 @@ class TestBriefingDrafterAgent:
         recs = result.sections.get("recommendations", "")
         assert "IMMEDIATE" in recs
         assert "SHORT-TERM" in recs
+
+    def test_llm_composes_briefing(self, sample_osint_result, sample_graph_result, sample_threat_result, mock_llm):
+        mock_llm.invoke.return_value.content = "BOTTOM LINE: Risk is HIGH. Maintain ISR coverage."
+        agent = BriefingDrafterAgent(llm=mock_llm)
+        result = agent.run(
+            "Taiwan Strait",
+            osint_result=sample_osint_result,
+            graph_result=sample_graph_result,
+            threat_result=sample_threat_result,
+        )
+        assert result.metadata["generation_method"] == "llm"
+        assert "HIGH" in result.briefing_text
+        assert mock_llm.invoke.called

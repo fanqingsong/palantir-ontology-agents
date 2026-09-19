@@ -74,6 +74,17 @@ class TestThreatAssessorAgent:
         assert "overall_risk_score" in d
         assert "threat_assessments" in d
 
+    def test_llm_writes_assessments(self, mock_llm):
+        mock_llm.invoke.return_value.content = (
+            "PLA posture is highly likely to remain coercive over the next 72 hours.\n"
+            "Cyber access to port systems is a significant pre-positioning indicator."
+        )
+        agent = ThreatAssessorAgent(llm=mock_llm)
+        result = agent.run("Taiwan Strait")
+        assert mock_llm.invoke.called
+        assert result.key_findings
+        assert result.threat_assessments[0]["assessment"]
+
     def test_handles_missing_data(self):
         agent = ThreatAssessorAgent()
         result = agent.run("Unknown region with no data")

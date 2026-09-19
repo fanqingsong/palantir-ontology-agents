@@ -138,6 +138,19 @@ class OSINTAgent:
 
     def _generate_search_queries(self, query: str) -> list[str]:
         """Generate multiple search queries from the input query."""
+        if self.llm:
+            from src.agents.llm_support import bullet_lines, invoke_llm, load_prompt
+            raw = invoke_llm(
+                self.llm,
+                load_prompt("osint"),
+                "Generate 3 concise web search queries for this intelligence requirement. "
+                "Return one query per line and nothing else.\n\n"
+                f"Query: {query}",
+            )
+            generated = [line[:200] for line in bullet_lines(raw, limit=3)]
+            if generated:
+                return generated
+
         queries = [query]
         lower = query.lower()
 
@@ -183,6 +196,22 @@ class OSINTAgent:
 
     def _extract_key_findings(self, results: list[SearchResult]) -> list[str]:
         """Extract key findings from search results."""
+        if self.llm and results:
+            from src.agents.llm_support import bullet_lines, invoke_llm, load_prompt
+            blob = "\n".join(
+                f"- {sr.title}: {sr.content[:300]}" for sr in results[:8]
+            )
+            raw = invoke_llm(
+                self.llm,
+                load_prompt("osint"),
+                "Extract up to 6 key intelligence findings from these search results. "
+                "Return one finding per line.\n\n"
+                f"{blob}",
+            )
+            findings = bullet_lines(raw, limit=8)
+            if findings:
+                return findings
+
         findings: list[str] = []
         for sr in results:
             if sr.score >= 0.85:

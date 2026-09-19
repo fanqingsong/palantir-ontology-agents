@@ -38,7 +38,7 @@ def _timeline_entry(agent: str, status: str, detail: str = "") -> dict[str, Any]
     }
 
 
-def coordinator_node(state: AgentState) -> dict[str, Any]:
+def coordinator_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     """Coordinator node: initializes the workflow and prepares the ontology.
 
     Routes the query to OSINT, then Graph Analyst on the shared store.
@@ -55,7 +55,19 @@ def coordinator_node(state: AgentState) -> dict[str, Any]:
 
     timeline = state.get("timeline", []) or []
     timeline.append(_timeline_entry("coordinator", "started", f"Processing: {query[:80]}"))
-    timeline.append(_timeline_entry("coordinator", "completed", f"Ontology loaded: {store.entity_count} entities, {store.relationship_count} relationships"))
+
+    routing_note = (
+        f"Ontology loaded: {store.entity_count} entities, {store.relationship_count} relationships"
+    )
+    if llm:
+        from src.agents.llm_support import invoke_llm, load_prompt
+        routing_note = invoke_llm(
+            llm,
+            load_prompt("coordinator"),
+            f"Parse this intelligence query and produce a short routing plan.\n\nQuery: {query}",
+        )[:240]
+
+    timeline.append(_timeline_entry("coordinator", "completed", routing_note))
 
     return {
         "query": query,
@@ -69,7 +81,7 @@ def coordinator_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-def osint_node(state: AgentState) -> dict[str, Any]:
+def osint_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     """OSINT Collector node: searches web and extracts intelligence."""
     query = state.get("query", "Taiwan Strait supply chain disruption")
     store = _get_store(state)
@@ -77,7 +89,7 @@ def osint_node(state: AgentState) -> dict[str, Any]:
     timeline = state.get("timeline", []) or []
     timeline.append(_timeline_entry("osint_collector", "started", "Web search initiated"))
 
-    agent = OSINTAgent(ontology_store=store)
+    agent = OSINTAgent(ontology_store=store, llm=llm)
     result = agent.run(query)
 
     timeline.append(_timeline_entry(
@@ -92,7 +104,7 @@ def osint_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-def graph_analyst_node(state: AgentState) -> dict[str, Any]:
+def graph_analyst_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     """Graph Analyst node: traverses ontology and analyzes relationships."""
     query = state.get("query", "Taiwan Strait supply chain disruption")
     store = _get_store(state)
@@ -100,7 +112,7 @@ def graph_analyst_node(state: AgentState) -> dict[str, Any]:
     timeline = state.get("timeline", []) or []
     timeline.append(_timeline_entry("graph_analyst", "started", "Ontology traversal initiated"))
 
-    agent = GraphAnalystAgent(ontology_store=store)
+    agent = GraphAnalystAgent(ontology_store=store, llm=llm)
     result = agent.run(query)
 
     timeline.append(_timeline_entry(
@@ -115,7 +127,7 @@ def graph_analyst_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-def threat_assessor_node(state: AgentState) -> dict[str, Any]:
+def threat_assessor_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     """Threat Assessor node: evaluates threats and calculates risk scores."""
     query = state.get("query", "Taiwan Strait supply chain disruption")
 
@@ -134,7 +146,7 @@ def threat_assessor_node(state: AgentState) -> dict[str, Any]:
     if graph_data:
         graph_result = GraphAnalysisResult(**{k: v for k, v in graph_data.items() if k in GraphAnalysisResult.__dataclass_fields__})
 
-    agent = ThreatAssessorAgent()
+    agent = ThreatAssessorAgent(llm=llm)
     result = agent.run(query, osint_result=osint_result, graph_result=graph_result)
 
     timeline.append(_timeline_entry(
@@ -149,7 +161,7 @@ def threat_assessor_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-def briefing_drafter_node(state: AgentState) -> dict[str, Any]:
+def briefing_drafter_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     """Briefing Drafter node: generates executive briefing from all results."""
     query = state.get("query", "Taiwan Strait supply chain disruption")
 
@@ -173,7 +185,7 @@ def briefing_drafter_node(state: AgentState) -> dict[str, Any]:
     if threat_data:
         threat_result = ThreatAssessmentResult(**{k: v for k, v in threat_data.items() if k in ThreatAssessmentResult.__dataclass_fields__})
 
-    agent = BriefingDrafterAgent()
+    agent = BriefingDrafterAgent(llm=llm)
     result = agent.run(query, osint_result=osint_result, graph_result=graph_result, threat_result=threat_result)
 
     timeline.append(_timeline_entry("briefing_drafter", "completed", "Executive briefing generated"))

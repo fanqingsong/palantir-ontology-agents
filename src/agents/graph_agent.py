@@ -205,6 +205,31 @@ class GraphAnalystAgent:
 
     def _generate_findings(self, result: GraphAnalysisResult) -> list[str]:
         """Generate human-readable key findings from the analysis."""
+        if self.llm:
+            from src.agents.llm_support import bullet_lines, invoke_llm, load_prompt
+            hubs = ", ".join(
+                f"{h['name']} (degree {h['degree']})" for h in result.hub_entities[:5]
+            )
+            high_exposure = [
+                e for e in result.exposure_scores if e.get("exposure_score", 0) >= 0.6
+            ]
+            raw = invoke_llm(
+                self.llm,
+                load_prompt("graph_analyst"),
+                "Write up to 5 actionable intelligence findings from this graph analysis. "
+                "Return one finding per line.\n\n"
+                f"Query: {result.query}\n"
+                f"Entities: {result.traversal_stats.get('total_entities', 0)}\n"
+                f"Relationships: {result.traversal_stats.get('total_relationships', 0)}\n"
+                f"Hubs: {hubs or 'none'}\n"
+                f"High-exposure entities: {len(high_exposure)}\n"
+                f"Dependency chains: {len(result.dependency_chains)}\n"
+                f"Critical paths: {len(result.critical_paths)}",
+            )
+            findings = bullet_lines(raw, limit=8)
+            if findings:
+                return findings
+
         findings: list[str] = []
 
         # Finding: Hub entities

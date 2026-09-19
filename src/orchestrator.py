@@ -11,6 +11,8 @@ from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage
 
+from src.agents.llm_support import MissingOpenAIKeyError
+
 
 class Orchestrator:
     """Main orchestrator for the multi-agent ontology workflow.
@@ -24,6 +26,7 @@ class Orchestrator:
         model_name: Optional[str] = None,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        llm: Any = None,
     ):
         """Initialize the orchestrator.
 
@@ -31,12 +34,14 @@ class Orchestrator:
             model_name: OpenAI-compatible model name. Falls back to OPENAI_MODEL, then gpt-4o-mini.
             api_key: API key. Falls back to OPENAI_API_KEY.
             base_url: Compatible API base URL. Falls back to OPENAI_BASE_URL or OPENAI_API_BASE.
+            llm: Optional pre-built chat model. Used in tests; otherwise built from api_key.
         """
         self.model_name = model_name or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.base_url = base_url or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
         self._workflow = None
-        self._llm = None
+        self._workflow_llm_id = None
+        self._llm = llm
 
     @property
     def llm(self):
@@ -60,9 +65,22 @@ class Orchestrator:
     @property
     def workflow(self):
         """Lazily build the workflow."""
-        if self._workflow is None:
+        return self._workflow_for(self.llm)
+
+    def _require_llm(self):
+        llm = self.llm
+        if llm is None:
+            raise MissingOpenAIKeyError(
+                "OPENAI_API_KEY is not set. Configure an OpenAI-compatible API key to run analysis."
+            )
+        return llm
+
+    def _workflow_for(self, llm):
+        key = id(llm) if llm is not None else None
+        if self._workflow is None or self._workflow_llm_id != key:
             from src.graph.workflow import build_workflow
-            self._workflow = build_workflow()
+            self._workflow = build_workflow(llm=llm)
+            self._workflow_llm_id = key
         return self._workflow
 
     def run(self, query: str) -> dict[str, Any]:
@@ -74,6 +92,7 @@ class Orchestrator:
         Returns:
             Final AgentState dict with all results.
         """
+        llm = self._require_llm()
         initial_state = {
             "messages": [HumanMessage(content=query)],
             "query": query,
@@ -88,7 +107,7 @@ class Orchestrator:
         }
 
         try:
-            result = self.workflow.invoke(initial_state)
+            result = self._workflow_for(llm).invoke(initial_state)
             return result
         except Exception as e:
             return {
@@ -108,6 +127,7 @@ class Orchestrator:
         Yields:
             Tuple of (node_name, state_update) for each completed node.
         """
+        llm = self._require_llm()
         initial_state = {
             "messages": [HumanMessage(content=query)],
             "query": query,
@@ -122,7 +142,7 @@ class Orchestrator:
         }
 
         try:
-            for event in self.workflow.stream(initial_state):
+            for event in self._workflow_for(llm).stream(initial_state):
                 for node_name, state_update in event.items():
                     yield node_name, state_update
         except Exception as e:
