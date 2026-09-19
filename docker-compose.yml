@@ -138,6 +138,7 @@ services:
       dockerfile: Dockerfile.worker
     command: ["python", "-m", "src.workers.kafka_bridge"]
     environment:
+      PYTHONUNBUFFERED: "1"
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_OUTBOX_TOPIC: ontology.public.outbox
       KAFKA_CONSUMER_GROUP: outbox-prefect-bridge
@@ -161,7 +162,8 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
-      ONTOLOGY_BACKEND: ${ONTOLOGY_BACKEND:-dual}
+      # Always dual in Compose so OSINT writes hit outbox → CDC → Prefect (ignore .env memory)
+      ONTOLOGY_BACKEND: dual
       OUTBOX_SYNC_FLUSH: ${OUTBOX_SYNC_FLUSH:-false}
       DATABASE_URL: postgresql://ontology:ontology@postgres:5432/ontology
       NEO4J_URI: bolt://neo4j:7687

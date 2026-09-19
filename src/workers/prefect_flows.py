@@ -5,17 +5,22 @@ from __future__ import annotations
 import os
 import uuid
 
-from prefect import flow, get_run_logger, task
-from prefect.context import get_run_context
+from prefect import flow, get_run_logger, runtime, task
 
 from src.ontology.outbox_projector import build_projector_from_env
+
+
+def _worker_id() -> str:
+    flow_run_id = getattr(runtime.flow_run, "id", None)
+    if flow_run_id:
+        return f"prefect-{flow_run_id}"
+    return f"prefect-{uuid.uuid4()}"
 
 
 @task(retries=2, retry_delay_seconds=10)
 def project_outbox_task(outbox_id: int) -> bool:
     logger = get_run_logger()
-    ctx = get_run_context()
-    worker_id = f"prefect-{ctx.flow_run.id if ctx.flow_run else uuid.uuid4()}"
+    worker_id = _worker_id()
     projector = build_projector_from_env()
     try:
         handled = projector.project_one(outbox_id, worker_id)

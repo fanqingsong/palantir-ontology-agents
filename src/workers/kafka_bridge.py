@@ -14,7 +14,12 @@ from confluent_kafka import Consumer, KafkaError
 from src.workers.kafka_cdc import should_trigger_debezium_record
 from src.workers.prefect_client import trigger_project_outbox_run
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,
+    force=True,
+)
 logger = logging.getLogger("outbox-kafka-bridge")
 
 _shutdown = False
@@ -73,9 +78,12 @@ def run_bridge() -> None:
         if outbox_id is None:
             continue
         logger.info("CDC outbox id=%s op=%s -> Prefect", outbox_id, payload.get("op"))
-        if not trigger_project_outbox_run(outbox_id):
+        ok = trigger_project_outbox_run(outbox_id)
+        if not ok:
             logger.error("Failed to trigger Prefect for outbox id=%s", outbox_id)
             time.sleep(2)
+        else:
+            logger.info("Triggered Prefect for outbox id=%s", outbox_id)
 
     consumer.close()
     logger.info("Bridge stopped")

@@ -260,7 +260,7 @@ docker compose up --build
 
 | Service | URL / port | Role |
 |---------|------------|------|
-| **app** | http://localhost:8501 | Streamlit demo (`ONTOLOGY_BACKEND=dual`, `OUTBOX_SYNC_FLUSH=false`) |
+| **app** | http://localhost:8501 | Streamlit demo (Compose **forces** `ONTOLOGY_BACKEND=dual`, `OUTBOX_SYNC_FLUSH=false`) |
 | **prefect-server** | http://localhost:4200 | Self-hosted Prefect UI + API |
 | **neo4j** | http://localhost:7474 | Graph browser (`neo4j` / `ontology-dev`) |
 | **postgres** | localhost:5432 | Ontology DB + outbox + Prefect metadata DB (`prefect`) |
