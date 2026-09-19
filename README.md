@@ -263,7 +263,7 @@ docker compose up --build
 | **kafka** | localhost:9092 | Single-node broker (Bitnami KRaft) |
 | **kafka-connect** | localhost:8083 | Debezium Connect REST (`quay.io/debezium/connect:2.7`) |
 
-Background services (no UI): **prefect-worker** (runs projection flows), **outbox-bridge** (Kafka → Prefect), **debezium-init** (one-shot connector registration).
+Background services (no UI): **prefect-worker**, **outbox-bridge**, **debezium-init**. What each container does, and how they wire together, is in [Compose microservices](#compose-microservices).
 
 Most Compose images use the Huawei SWR docker.io mirror (`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/...`). Two tags are not available there:
 
@@ -319,6 +319,231 @@ print(result['briefing']['briefing_text'])
 "
 ```
 
+## Compose microservices
+
+`docker-compose.yml` starts **nine** services. They are not nine copies of the same app. Four planes share one ontology write:
+
+```text
+  Demo UI          app  ──writes──►  Postgres (source of truth)
+                                      │
+  Data stores      postgres + neo4j   │ CDC
+                                      ▼
+  Change capture   kafka-connect → kafka → outbox-bridge
+                                      │
+  Job runner       prefect-server ←───┘
+                   prefect-worker ──MERGE──► Neo4j (graph projection)
+```
+
+```mermaid
+flowchart TB
+  subgraph demo["1. Demo"]
+    APP["app<br/>Streamlit :8501"]
+  end
+
+  subgraph stores["2. Ontology stores"]
+    PG[("postgres :5432<br/>DB ontology — entities / outbox<br/>DB prefect — Prefect metadata")]
+    N4J[("neo4j :7687 / :7474<br/>typed graph projection")]
+  end
+
+  subgraph cdc["3. Change capture"]
+    KC["kafka-connect :8083<br/>Debezium Connect"]
+    DI["debezium-init<br/>one-shot: register connector"]
+    K["kafka :9092<br/>topic ontology.public.outbox"]
+  end
+
+  subgraph jobs["4. Projection jobs"]
+    PS["prefect-server :4200<br/>API + UI"]
+    PW["prefect-worker<br/>claim row, MERGE Neo4j"]
+    BR["outbox-bridge<br/>Kafka → Prefect flow run"]
+  end
+
+  APP -->|"upsert entity/rel + INSERT outbox"| PG
+  APP -->|"read entities"| PG
+  APP -->|"traverse after drain"| N4J
+
+  PG -->|"logical WAL / pgoutput"| KC
+  DI -.->|"POST /connectors"| KC
+  KC -->|"CDC JSON"| K
+  K -->|"consume group outbox-prefect-bridge"| BR
+  BR -->|"create_flow_run<br/>project-outbox-row"| PS
+  PS --> PW
+  PW -->|"claim pending row"| PG
+  PW -->|"MERGE / DELETE"| N4J
+  PS -->|"metadata"| PG
+
+  style APP fill:#90EE90,stroke:#333
+  style PG fill:#cfe8ff,stroke:#333
+  style N4J fill:#ffd9b3,stroke:#333
+  style K fill:#e6d5ff,stroke:#333
+  style KC fill:#e6d5ff,stroke:#333
+  style DI fill:#f0f0f0,stroke:#333
+  style PS fill:#ffe6a0,stroke:#333
+  style PW fill:#ffe6a0,stroke:#333
+  style BR fill:#ffe6a0,stroke:#333
+```
+
+**Postgres is the system of record. Neo4j is a projection.** The CDC + Prefect path exists so the Streamlit app does not block on graph writes (`OUTBOX_SYNC_FLUSH=false` by default). The agent write/read contract for that path is in [Dual mode: outbox and Neo4j projection](#dual-mode-outbox-and-neo4j-projection).
+
+### What each service does
+
+| Service | Image / process | Does | Does not |
+|---------|-----------------|------|----------|
+| **postgres** | `postgres:16-alpine` with `wal_level=logical` | Holds `entities`, `relationships`, transactional `outbox`; also hosts the `prefect` metadata database | Run agents or talk to Neo4j |
+| **neo4j** | `neo4j:5-community` | Graph browser + Bolt API for typed labels and Cypher `shortestPath` | Accept app writes in dual mode (projection only) |
+| **app** | `Dockerfile` → `streamlit run src/ui/app.py` | LangGraph demo: OSINT writes Postgres (+ outbox), Graph Analyst traverses Neo4j after `drain_outbox()` | Consume Kafka or start Prefect runs |
+| **kafka** | Bitnami Kafka 3.7 (KRaft, single node) | Carries Debezium CDC for `public.outbox` | Know about ontology types |
+| **kafka-connect** | `quay.io/debezium/connect:2.7` | Runs the Postgres connector; reads WAL, publishes to `ontology.public.outbox` | Register itself (see **debezium-init**) |
+| **debezium-init** | `curl` one-shot | Waits for Connect, `POST`s `infra/debezium/postgres-outbox.json`, exits 0 on HTTP 201/409 | Stay running |
+| **prefect-server** | `prefect server start :4200` | API + UI for deployments and flow runs | Execute projection Python |
+| **prefect-worker** | `scripts/prefect-worker-entrypoint.sh` | Creates work pool, deploys `prefect.yaml`, runs `project-outbox-row` / `reconcile-pending-outbox` | Subscribe to Kafka |
+| **outbox-bridge** | `python -m src.workers.kafka_bridge` | Consumes CDC; on INSERT or retry-to-`pending`, triggers `project-outbox-row/project-outbox-row` | Write Neo4j or claim outbox rows |
+
+```mermaid
+flowchart LR
+  subgraph write["User hits Run Analysis"]
+    U[Browser] --> APP[app]
+    APP --> PG[(postgres)]
+  end
+
+  subgraph async["Meanwhile, projection"]
+    PG --> KC[kafka-connect]
+    KC --> K[kafka]
+    K --> BR[outbox-bridge]
+    BR --> PS[prefect-server]
+    PS --> PW[prefect-worker]
+    PW --> N4J[(neo4j)]
+    PW --> PG
+  end
+```
+
+### How they depend on each other
+
+Compose `depends_on` is the boot order, not the data flow. Three services have **no** service dependencies and can start in parallel: **postgres**, **neo4j**, **kafka**.
+
+```mermaid
+flowchart TB
+  PG[postgres healthy]
+  N4J[neo4j healthy]
+  K[kafka healthy]
+
+  PG --> KC[kafka-connect]
+  K --> KC
+  PG --> DI[debezium-init]
+  KC --> DI
+
+  PG --> PS[prefect-server]
+  PS --> PW[prefect-worker]
+  PG --> PW
+  N4J --> PW
+
+  K --> BR[outbox-bridge]
+  PW --> BR
+  DI -->|"must exit 0"| BR
+
+  PG --> APP[app]
+  N4J --> APP
+
+  style DI fill:#f0f0f0,stroke:#333
+  style BR fill:#ffe6a0,stroke:#333
+  style APP fill:#90EE90,stroke:#333
+```
+
+| Waits for | Why |
+|-----------|-----|
+| **kafka-connect** → postgres + kafka | Connector reads WAL and writes topics |
+| **debezium-init** → kafka-connect + postgres | REST register; **exits** when the `ontology-outbox` connector exists (201) or already exists (409) |
+| **prefect-server** → postgres | Metadata DB `prefect` (created by `infra/postgres/init-prefect-db.sql`) |
+| **prefect-worker** → prefect-server + postgres + neo4j | Needs API, outbox rows, and Bolt |
+| **outbox-bridge** → kafka + prefect-worker + **debezium-init success** | No point consuming an empty topic or triggering a pool that is not registered |
+| **app** → postgres + neo4j | Dual store. It does **not** wait for Kafka/Prefect; first writes land in Postgres even if projection lags |
+
+Startup in practice looks like this:
+
+```mermaid
+sequenceDiagram
+  participant PG as postgres
+  participant N4J as neo4j
+  participant K as kafka
+  participant KC as kafka-connect
+  participant DI as debezium-init
+  participant PS as prefect-server
+  participant PW as prefect-worker
+  participant BR as outbox-bridge
+  participant APP as app
+
+  par data plane
+    PG->>PG: ontology + prefect DBs
+    N4J->>N4J: Bolt + browser
+    K->>K: KRaft broker
+  end
+  KC->>K: produce CDC
+  DI->>KC: register ontology-outbox
+  DI-->>DI: exit 0
+  PS->>PG: Prefect metadata
+  PW->>PS: deploy flows, start pool
+  BR->>K: subscribe ontology.public.outbox
+  APP->>PG: dual writes
+  APP->>N4J: graph reads
+```
+
+### Two runtime paths (same stack)
+
+**Path A — analysis (you click in the UI)**
+
+```text
+Browser :8501
+  → app (LangGraph)
+      → postgres  INSERT entities / relationships / outbox
+      → neo4j     traverse (after drain_outbox)
+      → briefing  stays in LangGraph state, not a new container
+```
+
+**Path B — keep Neo4j in sync (background)**
+
+```text
+postgres outbox INSERT (status=pending)
+  → WAL  → kafka-connect (Debezium)
+  → kafka topic ontology.public.outbox
+  → outbox-bridge   filter: create, or update back to pending
+  → prefect-server  flow run project-outbox-row
+  → prefect-worker  claim row → MERGE Neo4j → mark done
+```
+
+If Path B drops a message, **prefect-worker** still runs `reconcile-pending-outbox` every 5 minutes and re-triggers leftover `pending` rows. That is why bridge and worker are split: Kafka is the fast trigger; Prefect is the durable executor.
+
+```mermaid
+sequenceDiagram
+  participant APP as app
+  participant PG as postgres
+  participant KC as kafka-connect
+  participant K as kafka
+  participant BR as outbox-bridge
+  participant PF as prefect-server
+  participant W as prefect-worker
+  participant N4J as neo4j
+
+  APP->>PG: upsert entity + INSERT outbox pending
+  PG-->>KC: WAL change
+  KC->>K: Debezium op=c after.status=pending
+  K->>BR: consume
+  BR->>PF: create_flow_run outbox_id
+  PF->>W: project-outbox-row
+  W->>PG: claim processing
+  W->>N4J: MERGE node/edge
+  W->>PG: mark done
+```
+
+### Ports and credentials (local)
+
+| Where | URL | Login |
+|-------|-----|--------|
+| Demo UI | http://localhost:8501 | — |
+| Prefect | http://localhost:4200 | — |
+| Neo4j Browser | http://localhost:7474 | `neo4j` / `ontology-dev` |
+| Postgres | `localhost:5432` | `ontology` / `ontology` — databases `ontology` and `prefect` |
+| Kafka | `localhost:9092` | plaintext |
+| Connect REST | http://localhost:8083 | — |
+
 ## Demo Scenario: Taiwan Strait Supply Chain Disruption
 
 The system analyzes a realistic geopolitical scenario:
@@ -357,7 +582,7 @@ That is why a question like "does a Kaohsiung blockade hit Apple?" is answered b
 
 ### Dual mode: outbox and Neo4j projection
 
-Postgres remains the source of truth. Neo4j is a read-optimized projection for traversal and Cypher shortest paths.
+Postgres remains the source of truth. Neo4j is a read-optimized projection for traversal and Cypher shortest paths. Which Compose container owns each hop is in [Compose microservices](#compose-microservices).
 
 ```mermaid
 flowchart LR
