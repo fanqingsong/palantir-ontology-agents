@@ -261,9 +261,18 @@ docker compose up --build
 | **neo4j** | http://localhost:7474 | Graph browser (`neo4j` / `ontology-dev`) |
 | **postgres** | localhost:5432 | Ontology DB + outbox + Prefect metadata DB (`prefect`) |
 | **kafka** | localhost:9092 | Single-node broker (Bitnami KRaft) |
-| **kafka-connect** | localhost:8083 | Debezium Connect REST |
+| **kafka-connect** | localhost:8083 | Debezium Connect REST (`quay.io/debezium/connect:2.7`) |
 
 Background services (no UI): **prefect-worker** (runs projection flows), **outbox-bridge** (Kafka → Prefect), **debezium-init** (one-shot connector registration).
+
+Most Compose images use the Huawei SWR docker.io mirror (`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/...`). Two tags are not available there:
+
+| Service | Image | Why |
+|---------|-------|-----|
+| **neo4j** | `.../library/neo4j:5-community` | Floating `neo4j:5` is missing on that mirror. |
+| **kafka-connect** | `quay.io/debezium/connect:2.7` | Debezium 2.7+ is published on Quay; the Huawei docker.io path 404s or requires login. |
+
+App and worker images still use the Huawei `python:3.11-slim` base and Tsinghua PyPI.
 
 ```bash
 # Stop (keep volumes)

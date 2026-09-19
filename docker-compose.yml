@@ -25,7 +25,7 @@ services:
       retries: 10
 
   neo4j:
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/neo4j:5
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/neo4j:5-community
     environment:
       NEO4J_AUTH: neo4j/ontology-dev
     ports:
@@ -63,7 +63,7 @@ services:
       start_period: 30s
 
   kafka-connect:
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/debezium/connect:2.7
+    image: quay.io/debezium/connect:2.7
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: connect-cluster
