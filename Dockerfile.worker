@@ -1,0 +1,15 @@
+FROM swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/python:3.11-slim
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY requirements.txt requirements-outbox.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-outbox.txt \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+COPY . .
+
+RUN chmod +x scripts/prefect-worker-entrypoint.sh scripts/register-debezium.sh

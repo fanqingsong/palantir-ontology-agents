@@ -12,7 +12,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from src.graph.state import AgentState
-from src.ontology.loader import load_sample_data
+from src.ontology.factory import backend_mode, get_shared_store
 from src.ontology.store import OntologyStore
 from src.agents.osint_agent import OSINTAgent
 from src.agents.graph_agent import GraphAnalystAgent
@@ -23,9 +23,10 @@ from src.agents.graph_agent import GraphAnalysisResult
 
 
 def _get_store(state: AgentState) -> OntologyStore:
-    """Reconstruct or load the ontology store from state."""
-    # Always load fresh sample data for the demo
-    return load_sample_data()
+    """Return the process-shared ontology store."""
+    store = get_shared_store()
+    store.drain_outbox()
+    return store
 
 
 def _timeline_entry(agent: str, status: str, detail: str = "") -> dict[str, Any]:
@@ -40,7 +41,7 @@ def _timeline_entry(agent: str, status: str, detail: str = "") -> dict[str, Any]
 def coordinator_node(state: AgentState) -> dict[str, Any]:
     """Coordinator node: initializes the workflow and prepares the ontology.
 
-    Routes the query to parallel OSINT and Graph Analyst agents.
+    Routes the query to OSINT, then Graph Analyst on the shared store.
     """
     query = state.get("query", "") or ""
     if not query:
@@ -50,7 +51,7 @@ def coordinator_node(state: AgentState) -> dict[str, Any]:
                 query = msg.content
                 break
 
-    store = load_sample_data()
+    store = _get_store(state)
 
     timeline = state.get("timeline", []) or []
     timeline.append(_timeline_entry("coordinator", "started", f"Processing: {query[:80]}"))
@@ -58,7 +59,10 @@ def coordinator_node(state: AgentState) -> dict[str, Any]:
 
     return {
         "query": query,
-        "ontology_store_data": store.to_dict(),
+        "ontology_store_data": {
+            "stats": store.snapshot_stats(),
+            "backend": backend_mode(),
+        },
         "timeline": timeline,
         "status": "coordinator_complete",
         "messages": [AIMessage(content=f"[Coordinator] Initialized ontology with {store.entity_count} entities. Dispatching OSINT and Graph Analyst agents for: {query[:100]}")],

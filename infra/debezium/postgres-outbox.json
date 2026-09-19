@@ -1,0 +1,21 @@
+{
+  "name": "ontology-outbox",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "ontology",
+    "database.password": "ontology",
+    "database.dbname": "ontology",
+    "topic.prefix": "ontology",
+    "table.include.list": "public.outbox",
+    "plugin.name": "pgoutput",
+    "publication.name": "dbz_outbox",
+    "slot.name": "debezium_outbox",
+    "tombstones.on.delete": "false",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false"
+  }
+}

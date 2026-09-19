@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 import pytest
 
+from src.ontology.factory import reset_shared_store
 from src.ontology.loader import load_sample_data
 from src.ontology.store import OntologyStore
 from src.ontology.schema import (
@@ -15,6 +16,13 @@ from src.agents.osint_agent import OSINTResult
 from src.agents.graph_agent import GraphAnalysisResult
 from src.agents.threat_agent import ThreatAssessmentResult
 from src.agents.briefing_agent import BriefingResult
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_ontology_store():
+    reset_shared_store()
+    yield
+    reset_shared_store()
 
 
 @pytest.fixture

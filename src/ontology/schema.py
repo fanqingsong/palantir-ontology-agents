@@ -151,3 +151,40 @@ class Relationship:
         d = asdict(self)
         d["relationship_type"] = self.relationship_type.value
         return d
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Relationship:
+        data = data.copy()
+        data["relationship_type"] = RelationshipType(data["relationship_type"])
+        allowed = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in allowed})
+
+
+ENTITY_CLASS_BY_TYPE: dict[EntityType, type[Entity]] = {
+    EntityType.ORGANIZATION: Organization,
+    EntityType.PERSON: Person,
+    EntityType.LOCATION: Location,
+    EntityType.EVENT: Event,
+    EntityType.ASSET: Asset,
+    EntityType.THREAT: Threat,
+}
+
+TYPE_SPECIFIC_FIELDS: dict[EntityType, tuple[str, ...]] = {
+    EntityType.ORGANIZATION: ("org_type", "country", "sector", "revenue_usd"),
+    EntityType.PERSON: ("role", "nationality", "affiliation"),
+    EntityType.LOCATION: ("latitude", "longitude", "location_type", "country"),
+    EntityType.EVENT: ("event_type", "start_date", "end_date", "severity"),
+    EntityType.ASSET: ("asset_type", "operator", "status"),
+    EntityType.THREAT: ("threat_type", "severity", "likelihood", "impact_description"),
+}
+
+
+def entity_from_dict(data: dict[str, Any]) -> Entity:
+    """Reconstruct a typed entity from a serialized dict."""
+    payload = data.copy()
+    raw_type = payload.get("entity_type", EntityType.ORGANIZATION)
+    entity_type = raw_type if isinstance(raw_type, EntityType) else EntityType(raw_type)
+    payload["entity_type"] = entity_type
+    cls = ENTITY_CLASS_BY_TYPE.get(entity_type, Entity)
+    allowed = {f.name for f in cls.__dataclass_fields__.values()}
+    return cls(**{k: v for k, v in payload.items() if k in allowed})

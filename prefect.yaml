@@ -1,0 +1,20 @@
+# Prefect deployments for ontology outbox -> Neo4j projection (self-hosted)
+name: ontology-outbox-projection
+prefect-version: ">=3.0.0"
+
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+  - name: project-outbox-row
+    entrypoint: src/workers/prefect_flows.py:project_outbox_row
+    work_pool:
+      name: default-process-pool
+
+  - name: reconcile-pending-outbox
+    entrypoint: src/workers/prefect_flows.py:reconcile_pending_outbox
+    work_pool:
+      name: default-process-pool
+    schedules:
+      - interval: 300

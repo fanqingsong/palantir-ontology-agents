@@ -1,0 +1,2 @@
+CREATE DATABASE prefect;
+GRANT ALL PRIVILEGES ON DATABASE prefect TO ontology;

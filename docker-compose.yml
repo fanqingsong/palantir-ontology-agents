@@ -1,4 +1,157 @@
 services:
+  postgres:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
+      - -c
+      - max_wal_senders=4
+    environment:
+      POSTGRES_USER: ontology
+      POSTGRES_PASSWORD: ontology
+      POSTGRES_DB: ontology
+    ports:
+      - "5432:5432"
+    volumes:
+      - ontology_pg:/var/lib/postgresql/data
+      - ./infra/postgres/init-prefect-db.sql:/docker-entrypoint-initdb.d/02-prefect.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ontology -d ontology"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/neo4j:5
+    environment:
+      NEO4J_AUTH: neo4j/ontology-dev
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - ontology_neo4j:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ontology-dev 'RETURN 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kafka:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: "0"
+      KAFKA_CFG_PROCESS_ROLES: controller,broker
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      ALLOW_PLAINTEXT_LISTENER: "yes"
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 30s
+
+  kafka-connect:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/debezium/connect:2.7
+    environment:
+      BOOTSTRAP_SERVERS: kafka:9092
+      GROUP_ID: connect-cluster
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    ports:
+      - "8083:8083"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  debezium-init:
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/curlimages/curl:8.5.0
+    volumes:
+      - ./infra/debezium/postgres-outbox.json:/config/postgres-outbox.json:ro
+      - ./scripts/register-debezium.sh:/register-debezium.sh:ro
+    entrypoint: ["/bin/sh", "/register-debezium.sh"]
+    environment:
+      KAFKA_CONNECT_URL: http://kafka-connect:8083
+      DEBEZIUM_CONNECTOR_CONFIG: /config/postgres-outbox.json
+    depends_on:
+      kafka-connect:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+
+  prefect-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command: prefect server start --host 0.0.0.0 --port 4200
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://ontology:ontology@postgres:5432/prefect
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+    ports:
+      - "4200:4200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prefect-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    entrypoint: ["/bin/sh", "/app/scripts/prefect-worker-entrypoint.sh"]
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      DATABASE_URL: postgresql://ontology:ontology@postgres:5432/ontology
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ontology-dev
+    depends_on:
+      prefect-server:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    restart: unless-stopped
+
+  outbox-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command: ["python", "-m", "src.workers.kafka_bridge"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_OUTBOX_TOPIC: ontology.public.outbox
+      KAFKA_CONSUMER_GROUP: outbox-prefect-bridge
+      PREFECT_API_URL: http://prefect-server:4200/api
+      PREFECT_OUTBOX_DEPLOYMENT: project-outbox-row/project-outbox-row
+    depends_on:
+      kafka:
+        condition: service_healthy
+      prefect-worker:
+        condition: service_started
+      debezium-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   app:
     build: .
     ports:
@@ -8,4 +161,19 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      ONTOLOGY_BACKEND: ${ONTOLOGY_BACKEND:-dual}
+      OUTBOX_SYNC_FLUSH: ${OUTBOX_SYNC_FLUSH:-false}
+      DATABASE_URL: postgresql://ontology:ontology@postgres:5432/ontology
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ontology-dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
     restart: unless-stopped
+
+volumes:
+  ontology_pg:
+  ontology_neo4j:

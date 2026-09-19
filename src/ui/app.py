@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 import streamlit as st
 
 from src.orchestrator import Orchestrator
-from src.ontology.loader import load_sample_data
+from src.ontology.factory import get_shared_store
 
 
 # --- Page config ---
@@ -38,50 +38,80 @@ def render_header():
     st.markdown("---")
 
 
-def render_ontology_graph():
-    """Render the ontology graph visualization using graphviz."""
-    store = load_sample_data()
+GRAPH_COLORS = {
+    "organization": "#90EE90",
+    "person": "#87CEEB",
+    "location": "#FFB6C1",
+    "event": "#FFD700",
+    "asset": "#DDA0DD",
+    "threat": "#FF6347",
+}
 
+
+def render_ontology_graph(graph_results: dict | None = None):
+    """Render an interactive ontology graph from the shared store."""
+    store = get_shared_store()
+    high_exposure = {
+        e.get("entity_id")
+        for e in (graph_results or {}).get("exposure_scores", [])
+        if e.get("exposure_score", 0) >= 0.6
+    }
+    hubs = {h.get("id") for h in (graph_results or {}).get("hub_entities", [])}
+
+    try:
+        from streamlit_agraph import Config, Edge, Node, agraph
+    except ImportError:
+        _render_graphviz_fallback(store)
+        return
+
+    nodes = []
+    for entity in store.all_entities():
+        color = GRAPH_COLORS.get(entity.entity_type.value, "#FFFFFF")
+        if entity.source == "osint_agent":
+            color = "#FF8C00"
+        size = 32 if entity.id in hubs or entity.id in high_exposure else 22
+        nodes.append(Node(
+            id=entity.id,
+            label=entity.name[:28],
+            color=color,
+            size=size,
+            title=f"{entity.entity_type.value}: {entity.description[:160]}",
+        ))
+    edges = [
+        Edge(
+            source=rel.source_id,
+            target=rel.target_id,
+            label=rel.relationship_type.value.replace("_", " "),
+        )
+        for rel in store.all_relationships()
+    ]
+    config = Config(
+        width=1100,
+        height=560,
+        directed=True,
+        physics=True,
+        hierarchical=False,
+        groups={},
+    )
+    agraph(nodes=nodes, edges=edges, config=config)
+
+
+def _render_graphviz_fallback(store) -> None:
     dot_lines = [
         "digraph ontology {",
-        '  rankdir=LR;',
-        '  node [shape=box, style=filled, fontsize=10];',
-        '  edge [fontsize=8];',
+        "  rankdir=LR;",
+        "  node [shape=box, style=filled, fontsize=10];",
+        "  edge [fontsize=8];",
     ]
-
-    # Color map by entity type
-    colors = {
-        "organization": "#90EE90",
-        "person": "#87CEEB",
-        "location": "#FFB6C1",
-        "event": "#FFD700",
-        "asset": "#DDA0DD",
-        "threat": "#FF6347",
-    }
-
-    # Add nodes
     for entity in store.all_entities():
-        color = colors.get(entity.entity_type.value, "#FFFFFF")
-        label = entity.name.replace('"', '\\"')
-        if len(label) > 25:
-            label = label[:22] + "..."
-        dot_lines.append(
-            f'  "{entity.id}" [label="{label}", fillcolor="{color}"];'
-        )
-
-    # Add edges (limit to key relationships for readability)
-    rel_count = 0
+        color = GRAPH_COLORS.get(entity.entity_type.value, "#FFFFFF")
+        label = entity.name.replace('"', '\\"')[:25]
+        dot_lines.append(f'  "{entity.id}" [label="{label}", fillcolor="{color}"];')
     for rel in store.all_relationships():
-        if rel_count > 60:
-            break
         label = rel.relationship_type.value.replace("_", " ")
-        dot_lines.append(
-            f'  "{rel.source_id}" -> "{rel.target_id}" [label="{label}"];'
-        )
-        rel_count += 1
-
+        dot_lines.append(f'  "{rel.source_id}" -> "{rel.target_id}" [label="{label}"];')
     dot_lines.append("}")
-    return "\n".join(dot_lines)
+    st.graphviz_chart("\n".join(dot_lines), use_container_width=True)
 
 
 def render_sidebar_timeline(timeline: list[dict]):
@@ -273,9 +303,9 @@ def main():
     # Ontology graph visualization
     if show_graph:
         st.markdown("### Ontology Graph")
+        st.caption("Shared store. Orange = OSINT writes this process. Larger nodes = hubs or high exposure after a run.")
         with st.spinner("Rendering ontology graph..."):
-            dot_source = render_ontology_graph()
-            st.graphviz_chart(dot_source, use_container_width=True)
+            render_ontology_graph()
 
     st.markdown("---")
 
@@ -338,6 +368,8 @@ def main():
             render_osint_panel(full_state.get("osint_results", {}))
         with tab2:
             render_graph_panel(full_state.get("graph_results", {}))
+            st.markdown("#### Graph overlay")
+            render_ontology_graph(full_state.get("graph_results", {}))
         with tab3:
             render_threat_panel(full_state.get("threat_results", {}))
         with tab4:
@@ -346,7 +378,7 @@ def main():
     else:
         # Show demo ontology stats
         st.markdown("### Demo Scenario: Taiwan Strait Supply Chain Disruption")
-        store = load_sample_data()
+        store = get_shared_store()
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:

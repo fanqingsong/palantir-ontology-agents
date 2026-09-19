@@ -238,3 +238,23 @@ class OSINTAgent:
             existing = self.store.search(finding[:30])
             if not existing:
                 self.store.add_entity(event)
+
+        for rel in result.new_relationships:
+            source_id = rel.get("source")
+            target_id = rel.get("target")
+            if not source_id or not target_id:
+                continue
+            if not self.store.get_entity(source_id) or not self.store.get_entity(target_id):
+                continue
+            rel_id = f"osint_{source_id}_{target_id}"
+            if self.store.get_relationship(rel_id):
+                continue
+            self.store.add_relationship(Relationship(
+                id=rel_id,
+                source_id=source_id,
+                target_id=target_id,
+                relationship_type=RelationshipType.RELATED_TO,
+                confidence=float(rel.get("confidence", 0.5)),
+                description="OSINT co-occurrence",
+                attributes={"source_url": rel.get("source_url", "")},
+            ))

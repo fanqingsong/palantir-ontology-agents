@@ -60,3 +60,12 @@ class TestOSINTAgent:
         entities = agent._extract_entities(results)
         ids = [e["id"] for e in entities]
         assert "tsmc" in ids
+
+    def test_writes_relationships_into_store(self, sample_ontology_store):
+        before = sample_ontology_store.relationship_count
+        agent = OSINTAgent(ontology_store=sample_ontology_store)
+        result = agent.run("Taiwan Strait supply chain disruption")
+        if result.new_relationships:
+            assert sample_ontology_store.relationship_count >= before
+            written = [rel for rel in result.new_relationships if sample_ontology_store.get_relationship(f"osint_{rel['source']}_{rel['target']}")]
+            assert written

@@ -137,6 +137,15 @@ class TestOntologyStore:
         assert "stats" in d
         assert d["stats"]["entity_count"] == 3
 
+    def test_from_dict_roundtrip(self, minimal_store):
+        restored = OntologyStore.from_dict(minimal_store.to_dict())
+        assert restored.entity_count == 3
+        assert restored.relationship_count == 2
+        org = restored.get_entity("org1")
+        assert org is not None
+        assert org.name == "Test Org"
+        assert restored.find_path("org1", "threat1") is not None
+
 
 class TestOntologyLoader:
     """Test the sample data loader."""

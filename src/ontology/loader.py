@@ -14,9 +14,11 @@ from src.ontology.schema import (
 from src.ontology.store import OntologyStore
 
 
-def load_sample_data() -> OntologyStore:
+def load_sample_data(store: OntologyStore | None = None) -> OntologyStore:
     """Load realistic Taiwan Strait scenario data into an OntologyStore."""
-    store = OntologyStore()
+    store = store or OntologyStore()
+    if store.get_entity("tsmc") is not None:
+        return store
 
     # =========================================================================
     # ORGANIZATIONS
