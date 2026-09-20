@@ -83,46 +83,44 @@ Orchestration is the LangGraph path above. The **Ontology Store** is one process
 
 In **dual** mode (Docker Compose default), Postgres is the system of record and Neo4j is a **graph projection** fed by an outbox pipeline (CDC → Kafka → Prefect). Writes do not block on Neo4j unless you opt into synchronous flush.
 
-The two live specialists use that graph differently: OSINT **aligns** open-source text onto canonical IDs (and writes events plus `RELATED_TO` edges); Graph Analyst **reads** the same typed edges to compute chains, hubs, and exposure.
+The two live specialists use that graph differently: OSINT **links** open-source mentions onto canonical IDs (aliases, confirmed schema edges, review queue); Graph Analyst **reads** the same typed edges — in Compose via a bounded Cypher loop, otherwise via the deterministic algorithms below.
 
 ## How OSINT and Graph Analyst use the ontology
 
 ```text
 Query
-  ├─ OSINT Collector     web text ──schema──► types/attrs/rels ──match──► canonical IDs
-  │                      co-occurrence ──► RELATED_TO ──write──► store
-  └─ Graph Analyst       schema gazetteer ──► focus ──traverse / path / degree / exposure──► findings
+  ├─ OSINT Collector     web text ──extract mentions/assertions──► Entity Linking (write)
+  │                      LINKED/NEW ──► canonical IDs + schema edges
+  │                      AMBIGUOUS/NIL ──► Postgres review queue (no silent insert)
+  └─ Graph Analyst       Entity Linking (query) ──► focus IDs
+                         agentic: plan/validate/execute Cypher ──► findings
+                         legacy/auto fallback: traverse / path / degree / exposure
 ```
 
 ```mermaid
 flowchart TB
-  subgraph OSINT["OSINT Collector — align + light write"]
+  subgraph OSINT["OSINT Collector — link, then write"]
     direction TB
-    W[Web search] --> X[Schema-constrained extract]
-    X --> A["store.get_entity(id) → canonical name"]
-    X --> R[Schema relationship types]
-    F[Key findings] --> D["store.search() de-dupe"]
-    D --> E["add_entity(EVENT)"]
+    W[Web search] --> X[Mention + assertion extract]
+    X --> L["EntityLinkingService mode=write"]
+    L --> A[LINKED: keep canonical ID / add alias]
+    L --> N[NEW: high-confidence canonical entity]
+    L --> Q[AMBIGUOUS / NIL: review queue]
+    X --> R[Confirmed schema-valid edges]
   end
 
   subgraph GA["Graph Analyst — read-only graph ops"]
     direction TB
-    K[Schema gazetteer] --> FO["store instances — focus nodes"]
-    FO --> C["schema dependency edges"]
-    FO --> P["BFS shortest path vs threats"]
-    FO --> H["degree = |neighbors|"]
-    FO --> S["exposure from hop distance"]
+    K[Entity linking mode=query] --> FO[Focus nodes]
+    FO --> AG["agentic Cypher loop on Neo4j"]
+    FO --> C["legacy: dependency / path / degree / exposure"]
   end
 
   ONT[(Ontology Store<br/>typed entities + labeled edges)]
   A --> ONT
-  E --> ONT
+  N --> ONT
   R --> ONT
   ONT --> FO
-  ONT --> C
-  ONT --> P
-  ONT --> H
-  ONT --> S
 
   style OSINT fill:#e8f5e9,stroke:#333
   style GA fill:#e3f2fd,stroke:#333
@@ -131,50 +129,56 @@ flowchart TB
 
 | Agent | Ontology role | Writes the store? |
 |-------|---------------|-------------------|
-| **OSINT Collector** | Align mentions to schema types in `ontology_schema.yaml` and canonical store IDs; append new typed objects plus schema-valid edges | Yes — new entities (including `EVENT` findings) and schema relationships |
-| **Graph Analyst** | The analysis object: traversal, supply-chain chains, hubs, exposure | No |
+| **OSINT Collector** | Extract mentions against `ontology_schema.yaml`, resolve them through Entity Linking, write confirmed objects and schema-valid edges | Yes — linked aliases, high-confidence new entities, confirmed relationships, mention/review rows |
+| **Graph Analyst** | The analysis object: agentic Cypher search or deterministic traversal, chains, hubs, exposure | No |
 
-### OSINT Collector: schema, then a few writes
+### OSINT Collector: link before any canonical write
 
-Pipeline in `src/agents/osint_agent.py`: search → match schema-valid store instances → optional LLM JSON extract against `config/ontology_schema.yaml` → key findings → infer relationships → store update.
+Pipeline in `src/agents/osint_agent.py`: search → gazetteer match against schema-valid store instances → LLM mention/assertion extract (`src/entity_linking/extractor.py`) → `EntityLinkingService.link(mode="write")` → persist mentions → write only confirmed graph objects.
 
-Extraction is constrained by the YAML schema (entity types, attributes, relationship types). Mentions resolve to canonical IDs already in the store (`TSMC` / `Taiwan Semiconductor` → `tsmc`) when the instance exists; unknown schema types are dropped. Same-article co-mentions become `RELATED_TO` (a schema relationship). The LLM may emit more specific types such as `DEPENDS_ON` or `THREATENS`; invalid types fall back to `RELATED_TO`.
+Extraction is constrained by the YAML schema (entity types, attributes, relationship types). Mentions resolve through hybrid candidate retrieval (canonical names, multilingual aliases, fuzzy match, Neo4j full-text, optional embeddings, type constraints, graph coherence). Unknown schema types are dropped.
 
-If the store already has that ID, the agent keeps the official `name` so "Taiwan Semiconductor" and "TSMC" collapse to one object:
+| Link status | What happens |
+|-------------|--------------|
+| **LINKED** | Reuse the canonical ID. If the surface form differs (`Taiwan Semiconductor` vs `TSMC`), add an alias and refresh the embedding. |
+| **NEW** | Only when no candidate exists **and** mention confidence ≥ `ENTITY_LINK_NEW_MIN_CONFIDENCE` (default 0.90). Creates a canonical entity (`ent_…`), not a slug from the headline. |
+| **AMBIGUOUS / NIL** | Recorded in Postgres (`entity_mentions` + `linking_review_queue`). Streamlit sidebar **Entity Linking Reviews** can approve, create, or reject. Nothing is inserted into the graph. |
+
+Same-article co-occurrence is **document evidence only**. `_infer_relationships()` does not write `RELATED_TO` edges. A graph edge is added only when both endpoints linked and the predicate is a schema relationship (`DEPENDS_ON`, `THREATENS`, …). Key findings stay as briefing text; they are not auto-inserted as `EVENT` nodes.
 
 ```mermaid
 flowchart LR
   T1["'TSMC'"] --> ID((tsmc))
   T2["'Taiwan Semiconductor'"] --> ID
-  ID --> N["store.get_entity('tsmc').name → TSMC"]
+  T3["'台积电'"] --> ID
+  ID --> N["canonical name → TSMC"]
 ```
-
-Same-article co-mentions become `RELATED_TO` edges with confidence `score * 0.8`. They are recorded in `OSINTResult.new_relationships` **and** written into the shared store as `osint_{source}_{target}` when both endpoints already exist.
-
-Each key finding is searched with `store.search(finding[:30])`. On a miss, a new `EntityType.EVENT` is added (`source="osint_agent"`, `confidence=0.7`). Existing orgs, ports, and threats are not mutated.
 
 ```mermaid
 sequenceDiagram
   participant Web as Search results
-  participant Schema as ontology_schema.yaml
-  participant Gaz as Store gazetteer
+  participant Ext as MentionExtractor
+  participant Link as EntityLinkingService
   participant Store as OntologyStore
-  participant Out as OSINTResult
+  participant Review as linking_review_queue
 
-  Web->>Schema: constrain types / attributes / rels
-  Schema->>Gaz: instances whose types are in schema
-  Gaz->>Store: get_entity(canonical id)
-  Store-->>Out: extracted_entities (aligned names)
-  Schema->>Store: add_relationship (schema-valid type)
-  Store-->>Out: new_relationships
-  Web->>Store: search(finding) then maybe add_entity(EVENT)
+  Web->>Ext: mentions + assertions vs ontology_schema.yaml
+  Ext->>Link: link(mode=write)
+  Link->>Store: LINKED alias / NEW entity
+  Link->>Review: AMBIGUOUS or NIL
+  Ext->>Store: add_relationship only if both ends linked
+  Store-->>Web: OSINTResult (aligned names, confirmed edges)
 ```
 
 ### Graph Analyst: agent-controlled graph search
 
-In `GRAPH_SEARCH_MODE=agentic` (the Compose default), Graph Analyst first extracts
-query mentions, resolves them through the same Entity Linking service used by
-OSINT, and then controls a bounded Neo4j search loop:
+Graph Analyst search mode (`GRAPH_SEARCH_MODE`, Compose default `agentic`):
+
+| Value | Behavior |
+|-------|----------|
+| **agentic** | Require Neo4j. Extract query mentions, link them (`mode=query`, not persisted), then run the bounded Cypher loop. Raises if the graph backend is unavailable. |
+| **auto** | Try the agentic path when Neo4j is up; otherwise fall back to the deterministic algorithms below (memory / Postgres). Python default if the env var is unset. |
+| **legacy** | Skip the Cypher loop even when an LLM and Neo4j are present. |
 
 ```text
 understand query → link entities → plan Cypher → validate → execute
@@ -182,16 +186,7 @@ understand query → link entities → plan Cypher → validate → execute
        └──────────── observe / re-plan / stop ─────────────┘
 ```
 
-Candidate retrieval combines canonical names, multilingual aliases, fuzzy
-matching, Neo4j full-text search, optional embeddings, type constraints, and
-graph coherence. Ambiguous and NIL mentions are recorded in Postgres for
-review instead of being silently inserted.
-
-Generated Cypher passes through a read-only gateway: write/admin clauses and
-procedures are rejected, paths must be bounded, values must be parameterized,
-and every query must have a capped `LIMIT`. Neo4j is required for agentic mode;
-`GRAPH_SEARCH_MODE=auto` retains the deterministic algorithms below as a
-memory/Postgres development fallback.
+Generated Cypher passes through `src/ontology/cypher_readonly.py`: write/admin clauses and procedures are rejected, paths must be bounded, values must be parameterized, and every query must have a capped `LIMIT` (`GRAPH_SEARCH_ROW_LIMIT`, default 100). The loop stops after `GRAPH_SEARCH_MAX_ROUNDS` (default 6), a repeated query, or the agent reporting enough evidence. The Streamlit **Agentic Graph Search Trace** expander shows each round's Cypher.
 
 ### Deterministic graph analysis fallback
 
@@ -233,11 +228,11 @@ flowchart LR
   Apple -.->|score 0.6| Blockade
 ```
 
-1 hop ≈ **1.0**, each extra hop minus **0.2**. Graph Analyst does not write edges; the `llm` constructor argument is unused.
+1 hop ≈ **1.0**, each extra hop minus **0.2**. Graph Analyst does not write edges. The LLM is used in **agentic** / **auto** mode to plan Cypher; it is unused on the legacy path.
 
 ### Same query, one shared graph
 
-Coordinator, OSINT, and Graph Analyst call `get_shared_store()`. The workflow is sequential so OSINT commits (and dual-mode outbox is drained) before Graph Analyst traverses. New `EVENT` nodes and `RELATED_TO` edges from this run are visible to graph analysis.
+Coordinator, OSINT, and Graph Analyst call `get_shared_store()`. The workflow is sequential so OSINT commits (and dual-mode outbox is drained) before Graph Analyst traverses. Confirmed aliases, new canonical entities, and schema-valid edges from this run are visible to graph analysis. Unresolved mentions stay in the review queue, not on the graph.
 
 ```mermaid
 flowchart TB
@@ -255,8 +250,10 @@ Downstream Threat Assessor / Briefing Drafter still consume **serialized results
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Coordinator Agent | **Live** | Routes queries, manages ontology state |
-| OSINT Collector | **Live** | Web search via Tavily, entity extraction |
-| Graph Analyst | **Live** | Ontology traversal, relationship analysis, exposure scoring |
+| OSINT Collector | **Live** | Web search via Tavily, mention extract, entity linking |
+| Graph Analyst | **Live** | Agentic Cypher search (Compose default) or deterministic traversal / exposure |
+| Entity Linking | **Live** | Hybrid retrieve + rerank + coherence; write-path review queue |
+| Read-only Cypher gateway | **Live** | Validates LLM Cypher before Neo4j (`cypher_readonly.py`) |
 | Ontology Store | **Live** | memory / postgres / neo4j / **dual** (PG + async outbox → Neo4j) |
 | Outbox projection | **Live** | Debezium CDC, Kafka, Prefect flows, reconcile schedule (Compose) |
 | Web Search Tool | **Live** | Tavily API with demo mode fallback |
@@ -578,7 +575,7 @@ The system analyzes a realistic geopolitical scenario:
 - **50+ entities**: TSMC, ASML, Apple, NVIDIA, US Pacific Fleet, PLA Navy, shipping companies, ports, military assets, threat vectors
 - **100+ relationships**: Supply chains, dependencies, military deployments, threat connections
 - **4 specialist agents** run in order so writes land before traversal:
-  1. **OSINT Collector** searches for current intelligence (Tavily web search or demo data) and updates the shared graph
+  1. **OSINT Collector** searches for current intelligence (Tavily web search or demo data), links mentions to canonical IDs, and writes only confirmed graph objects
   2. **Graph Analyst** traverses that same graph for dependency chains and exposure scores
   3. **Threat Assessor** evaluates risk with confidence scoring and historical precedents
   4. **Briefing Drafter** generates a structured executive briefing
@@ -592,7 +589,7 @@ The typed ontology layer is what agents coordinate *over*. It is not a document 
 - **Graph traversal**: N-hop queries, dependency chain discovery, exposure scoring
 - **Shortest path**: BFS in memory/Postgres; Cypher `shortestPath` on Neo4j
 - **Persistence**: pluggable backends behind `OntologyStore` (see below)
-- **UI**: interactive Streamlit graph (`streamlit-agraph`) on the shared store; OSINT nodes highlighted
+- **UI**: interactive Streamlit graph (`streamlit-agraph`) on the shared store; OSINT nodes highlighted; sidebar **Entity Linking Reviews**; Graph Analyst Cypher trace after a run
 
 That is why a question like "does a Kaohsiung blockade hit Apple?" is answered by walking the graph in the [example above](#what-that-sentence-means), not by hoping the model remembers a supply-chain article. How the two live agents actually read and write this layer is in [How OSINT and Graph Analyst use the ontology](#how-osint-and-graph-analyst-use-the-ontology).
 
@@ -652,9 +649,9 @@ flowchart LR
 | `false` (Compose default) | Production-like path: Kafka + Prefect worker stack |
 | `true` | Local debugging without workers; every write calls `flush_outbox()` in-process |
 
-Schema: `migrations/001_init.sql` (core tables), `migrations/002_outbox_processing.sql` (claim columns, Debezium publication). Worker image: `Dockerfile.worker` + `requirements-outbox.txt`. Deployments: `prefect.yaml`.
+Schema: `migrations/001_init.sql` (core tables), `migrations/002_outbox_processing.sql` (claim columns, Debezium publication), `migrations/003_entity_linking.sql` (aliases, mentions, assertions, review queue, embeddings). Worker image: `Dockerfile.worker` + `requirements-outbox.txt`. Deployments: `prefect.yaml`.
 
-Empty stores are seeded once from `load_sample_data()`. The Streamlit checkbox **Show Ontology Graph** renders the live shared graph (orange = this-process OSINT writes; larger nodes = hubs or high exposure after a run).
+Empty stores are seeded once from `load_sample_data()`. The Streamlit checkbox **Show Ontology Graph** renders the live shared graph (orange = this-process OSINT writes; larger nodes = hubs or high exposure after a run). Pending link decisions appear in the sidebar **Entity Linking Reviews** expander.
 
 ### Environment variables (dual / workers)
 
@@ -666,12 +663,24 @@ See `.env.example`. Common settings:
 | `OUTBOX_SYNC_FLUSH` | `false` | Synchronous Neo4j flush on each write |
 | `DATABASE_URL` | Postgres ontology DB | PG DSN |
 | `NEO4J_URI` / `NEO4J_USER` / `NEO4J_PASSWORD` | bolt + credentials | Neo4j projection |
+| `GRAPH_SEARCH_MODE` | `agentic` | `agentic` / `auto` / `legacy` (see Graph Analyst) |
+| `GRAPH_SEARCH_MAX_ROUNDS` | `6` | Agentic Cypher loop cap |
+| `GRAPH_SEARCH_ROW_LIMIT` | `100` | Forced `LIMIT` on generated Cypher |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Optional vector signal for entity linking |
+| `EMBEDDING_DIMENSION` | `1536` | Embedding width / Neo4j vector index |
+| `ENTITY_LINK_CANDIDATE_LIMIT` | `20` | Hybrid retriever candidate cap |
+| `ENTITY_LINK_QUERY_THRESHOLD` | `0.72` | Auto-link bar for Graph Analyst (query mode) |
+| `ENTITY_LINK_WRITE_THRESHOLD` | `0.90` | Auto-link bar for OSINT (write mode) |
+| `ENTITY_LINK_NEW_MIN_CONFIDENCE` | `0.90` | Minimum mention confidence to create a new entity |
+| `ENTITY_LINK_REVIEW_GAP` | `0.08` | Top-vs-second score margin; smaller gap → review |
 | `PREFECT_API_URL` | `http://prefect-server:4200/api` | Bridge + worker |
 | `PREFECT_OUTBOX_DEPLOYMENT` | `project-outbox-row/project-outbox-row` | Deployment to trigger |
 | `KAFKA_BOOTSTRAP_SERVERS` | `kafka:9092` | Bridge consumer |
 | `KAFKA_OUTBOX_TOPIC` | `ontology.public.outbox` | Debezium topic |
 | `OUTBOX_RECONCILE_BATCH` | `200` | Reconcile flow batch size |
 | `OUTBOX_LOCK_MINUTES` | `5` | Stale `processing` reclaim |
+
+Compose also sets `PREFECT_SERVER_UI_API_URL=http://localhost:4200/api` so the Prefect dashboard works from a WSL/Windows browser (it cannot call `http://0.0.0.0:4200/api`).
 
 ## Project Structure
 
@@ -680,27 +689,32 @@ src/
   orchestrator.py              -- Coordinator agent, routes tasks
   ontology/
     schema.py                  -- Typed entity and relationship dataclasses
+    schema_def.py              -- YAML schema loader (ontology_schema.yaml)
     store.py                   -- Facade used by agents
     factory.py                 -- get_shared_store() / ONTOLOGY_BACKEND
     memory.py                  -- In-memory backend
-    postgres_backend.py        -- Postgres + transactional outbox
+    postgres_backend.py        -- Postgres + transactional outbox + linking tables
     neo4j_backend.py           -- Neo4j graph backend + project_* helpers
     dual.py                    -- PG authoritative + Neo4j projection
+    cypher_readonly.py         -- Validate LLM-generated read-only Cypher
     outbox_projector.py        -- Claim outbox rows, MERGE to Neo4j
     loader.py                  -- 50+ entity Taiwan Strait scenario data
+  entity_linking/              -- Hybrid linker used by OSINT (write) and Graph Analyst (query)
   workers/
     prefect_flows.py           -- project-outbox-row + reconcile-pending-outbox
     prefect_client.py          -- Trigger deployment runs from bridge/reconcile
     kafka_bridge.py            -- Consume Debezium topic → Prefect
     kafka_cdc.py               -- CDC payload filters (testable, no Kafka import)
   agents/                      -- OSINT, Graph, Threat, Briefing
-  graph/                       -- LangGraph state, nodes, workflow
-  tools/                       -- Web search, ontology tools, threat mocks
-  ui/app.py                    -- Streamlit demo + graph visualization
+  graph/
+    workflow.py                -- Main LangGraph pipeline
+    graph_search_workflow.py   -- Agentic Neo4j search subgraph
+  tools/                       -- Web search, ontology tools, graph_search_tools, threat mocks
+  ui/app.py                    -- Streamlit demo + graph + linking review queue
 infra/
   debezium/postgres-outbox.json   -- Kafka Connect connector config
   postgres/init-prefect-db.sql    -- Prefect metadata database (first init)
-migrations/                  -- 001 core schema, 002 outbox CDC/claim
+migrations/                  -- 001 core, 002 outbox CDC/claim, 003 entity linking
 scripts/
   prefect-worker-entrypoint.sh    -- Deploy flows + start worker pool
   register-debezium.sh            -- Register connector on Connect startup
@@ -710,7 +724,7 @@ Dockerfile.worker            -- Prefect worker + Kafka bridge
 requirements.txt             -- App dependencies
 requirements-outbox.txt      -- Prefect, confluent-kafka, asyncpg
 tests/
-config/                      -- Agent configs and system prompts
+config/                      -- Agent configs, ontology_schema.yaml, system prompts
 docker-compose.yml           -- Full stack (app + PG + Neo4j + Kafka + Prefect)
 ```
 
@@ -724,12 +738,12 @@ This project draws structural inspiration from:
 
 ## Tech Stack
 
-- **LangGraph** — Sequential StateGraph: OSINT then Graph Analyst on one store
+- **LangGraph** — Sequential StateGraph: OSINT then Graph Analyst on one store; Graph Analyst has an agentic Cypher subgraph
 - **LangChain + ChatOpenAI** — OpenAI-compatible API for agent reasoning
 - **Tavily** — Real-time web search for OSINT
-- **Streamlit + streamlit-agraph** — Demo UI and interactive ontology graph
-- **Postgres** — System of record, transactional outbox (`pgoutput` publication for CDC)
-- **Neo4j** — Graph projection for traversal and Cypher paths
+- **Streamlit + streamlit-agraph** — Demo UI, ontology graph, entity-linking review queue
+- **Postgres** — System of record, transactional outbox (`pgoutput` publication for CDC), linking tables
+- **Neo4j** — Graph projection for traversal, full-text, optional embeddings, and Cypher paths
 - **Kafka (single node)** + **Debezium** — Outbox change capture
 - **Prefect 3 (self-hosted)** — Per-row projection flows + scheduled reconcile
 - **Python dataclasses** — Typed ontology schema
