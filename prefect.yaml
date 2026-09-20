@@ -16,6 +16,7 @@ deployments:
     entrypoint: src/workers/prefect_flows.py:reconcile_pending_outbox
     work_pool:
       name: default-process-pool
+    concurrency_limit: 1
     schedules:
       - interval: 300
 

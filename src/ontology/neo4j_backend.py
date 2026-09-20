@@ -40,6 +40,23 @@ def _label(entity_type: EntityType) -> str:
     return _TYPE_LABELS.get(entity_type, "Entity")
 
 
+_EXISTING_SCHEMA_CODES = {
+    "Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists",
+    "Neo.ClientError.Schema.ConstraintAlreadyExists",
+    "Neo.ClientError.Schema.IndexAlreadyExists",
+}
+
+
+def _run_schema(session: Any, cypher: str) -> None:
+    """Create a constraint/index, ignoring races with an equivalent rule."""
+    try:
+        session.run(cypher)
+    except Exception as exc:
+        if getattr(exc, "code", None) in _EXISTING_SCHEMA_CODES:
+            return
+        raise
+
+
 class Neo4jBackend:
     def __init__(self, uri: str, user: str, password: str) -> None:
         from neo4j import GraphDatabase
@@ -57,14 +74,16 @@ class Neo4jBackend:
 
     def _ensure_constraints(self) -> None:
         with self._driver.session() as session:
-            session.run(
-                "CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (n:Entity) REQUIRE n.id IS UNIQUE"
+            _run_schema(
+                session,
+                "CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (n:Entity) REQUIRE n.id IS UNIQUE",
             )
-            session.run(
+            _run_schema(
+                session,
                 """
                 CREATE FULLTEXT INDEX entity_text IF NOT EXISTS
                 FOR (n:Entity) ON EACH [n.name, n.canonical_name, n.aliases, n.description]
-                """
+                """,
             )
 
     def verify_connectivity(self) -> None:
@@ -294,7 +313,8 @@ class Neo4jBackend:
             raise ValueError("Invalid Neo4j vector index name")
         dimensions = int(dimensions)
         with self._driver.session() as session:
-            session.run(
+            _run_schema(
+                session,
                 f"""
                 CREATE VECTOR INDEX {name} IF NOT EXISTS
                 FOR (n:Entity) ON n.embedding
@@ -302,7 +322,7 @@ class Neo4jBackend:
                   `vector.dimensions`: {dimensions},
                   `vector.similarity_function`: 'cosine'
                 }}}}
-                """
+                """,
             )
 
     def execute_readonly(

@@ -63,6 +63,77 @@ def test_neo4j_backend_path(monkeypatch):
     assert store.find_path("a", "b") == ["a", "b"]
 
 
+class _SchemaConflict(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class _FakeSession:
+    def __init__(self, errors: dict[str, Exception]) -> None:
+        self._errors = errors
+        self.statements: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def run(self, query, **kwargs):
+        self.statements.append(query)
+        for needle, exc in self._errors.items():
+            if needle in query:
+                raise exc
+
+
+class _FakeDriver:
+    def __init__(self, session: _FakeSession) -> None:
+        self._session = session
+
+    def session(self):
+        return self._session
+
+    def close(self):
+        pass
+
+
+def _patch_neo4j_driver(monkeypatch, session: _FakeSession) -> None:
+    import neo4j
+
+    class FakeGraphDatabase:
+        @staticmethod
+        def driver(uri, auth):
+            return _FakeDriver(session)
+
+    monkeypatch.setattr(neo4j, "GraphDatabase", FakeGraphDatabase)
+
+
+def test_neo4j_backend_ignores_existing_fulltext_index(monkeypatch):
+    from src.ontology.neo4j_backend import Neo4jBackend
+
+    session = _FakeSession(
+        {"FULLTEXT": _SchemaConflict("Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists")}
+    )
+    _patch_neo4j_driver(monkeypatch, session)
+    backend = Neo4jBackend("bolt://example", "neo4j", "pwd")
+    try:
+        assert any("FULLTEXT" in stmt for stmt in session.statements)
+    finally:
+        backend.close()
+
+
+def test_neo4j_backend_reraises_other_schema_errors(monkeypatch):
+    from src.ontology.neo4j_backend import Neo4jBackend
+
+    session = _FakeSession(
+        {"FULLTEXT": _SchemaConflict("Neo.ClientError.Statement.SyntaxError")}
+    )
+    _patch_neo4j_driver(monkeypatch, session)
+    with pytest.raises(_SchemaConflict):
+        Neo4jBackend("bolt://example", "neo4j", "pwd")
+
+
 def test_snapshot_stats_are_lightweight(minimal_store: OntologyStore):
     stats = minimal_store.snapshot_stats()
     assert stats["entity_count"] == 3
