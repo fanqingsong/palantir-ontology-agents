@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from psycopg.errors import UndefinedTable
 from psycopg.rows import dict_row
-from psycopg.types.json import Json
+from psycopg.types.json import Json, Jsonb
 
 from src.ontology.codec import (
     entity_to_record,
@@ -529,7 +529,7 @@ class PostgresBackend:
                 WHERE id = %s
                 RETURNING *
                 """,
-                (Json(embedding), entity_id),
+                (Jsonb(embedding), entity_id),
             )
             row = cur.fetchone()
         if row and self.record_outbox:

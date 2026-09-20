@@ -39,6 +39,9 @@ class EmbeddingProvider:
             kwargs: dict[str, Any] = {
                 "model": self.model,
                 "api_key": os.environ["OPENAI_API_KEY"],
+                # Custom gateways (e.g. SiliconFlow + BAAI/bge-m3) are not in
+                # tiktoken; the default ctx-length check hangs on first embed.
+                "check_embedding_ctx_length": False,
             }
             base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE")
             if base_url:
