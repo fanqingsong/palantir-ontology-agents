@@ -134,6 +134,78 @@ def test_neo4j_backend_reraises_other_schema_errors(monkeypatch):
         Neo4jBackend("bolt://example", "neo4j", "pwd")
 
 
+class _SchemaCursor:
+    def __init__(self, applied: set[str]) -> None:
+        self.applied = applied
+        self.statements: list[str] = []
+        self._sql = ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=None):
+        self.statements.append(sql)
+        self._sql = sql
+        if params and "INSERT INTO _schema_migrations" in sql:
+            self.applied.add(params[0])
+
+    def fetchall(self):
+        if "FROM _schema_migrations" in self._sql:
+            return [{"filename": name} for name in sorted(self.applied)]
+        return []
+
+
+class _SchemaConn:
+    def __init__(self, applied: set[str]) -> None:
+        self.cursor_obj = _SchemaCursor(applied)
+        self.commits = 0
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        pass
+
+
+def _backend_with_fake_conn(tmp_path, monkeypatch, applied: set[str]):
+    from src.ontology import postgres_backend as mod
+
+    (tmp_path / "001_init.sql").write_text("CREATE TABLE foo();", encoding="utf-8")
+    (tmp_path / "002_outbox.sql").write_text("ALTER TABLE outbox ADD COLUMN locked_by TEXT;", encoding="utf-8")
+    monkeypatch.setattr(mod, "MIGRATIONS_DIR", tmp_path)
+    backend = object.__new__(mod.PostgresBackend)
+    backend._conn = _SchemaConn(applied)
+    return backend
+
+
+def test_apply_schema_skips_recorded_migrations(tmp_path, monkeypatch):
+    backend = _backend_with_fake_conn(
+        tmp_path, monkeypatch, {"001_init.sql", "002_outbox.sql"}
+    )
+    backend.apply_schema()
+    sql = "\n".join(backend._conn.cursor_obj.statements)
+    assert "CREATE TABLE foo();" not in sql
+    assert "ALTER TABLE outbox" not in sql
+    assert "pg_advisory_xact_lock" not in sql
+    assert backend._conn.commits == 1
+
+
+def test_apply_schema_runs_pending_migrations_once(tmp_path, monkeypatch):
+    backend = _backend_with_fake_conn(tmp_path, monkeypatch, set())
+    backend.apply_schema()
+    sql = "\n".join(backend._conn.cursor_obj.statements)
+    assert "CREATE TABLE foo();" in sql
+    assert "ALTER TABLE outbox ADD COLUMN locked_by TEXT;" in sql
+    assert "pg_advisory_xact_lock" in sql
+    assert backend._conn.commits == 1
+
+
 def test_snapshot_stats_are_lightweight(minimal_store: OntologyStore):
     stats = minimal_store.snapshot_stats()
     assert stats["entity_count"] == 3

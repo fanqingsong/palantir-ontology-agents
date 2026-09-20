@@ -105,6 +105,8 @@ services:
     environment:
       PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://ontology:ontology@postgres:5432/prefect
       PREFECT_SERVER_API_HOST: 0.0.0.0
+      # Browser must call localhost (WSL/Windows cannot fetch http://0.0.0.0:4200/api).
+      PREFECT_SERVER_UI_API_URL: http://localhost:4200/api
     ports:
       - "4200:4200"
     depends_on:

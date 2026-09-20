@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+from psycopg.errors import UndefinedTable
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
@@ -25,6 +26,8 @@ from src.ontology.schema import Entity, EntityType, Relationship, RelationshipTy
 from src.entity_linking.normalizer import normalize_surface
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
+# Session lock so concurrent Prefect workers do not ALTER outbox together.
+_SCHEMA_ADVISORY_LOCK = 872511
 
 
 class PostgresBackend:
@@ -36,10 +39,44 @@ class PostgresBackend:
         self._conn = psycopg.connect(dsn, row_factory=dict_row, autocommit=False)
         self.apply_schema()
 
+    def _schema_is_current(self, files: list[Path]) -> bool:
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT filename FROM _schema_migrations")
+                applied = {row["filename"] for row in cur.fetchall()}
+            if all(path.name in applied for path in files):
+                self._conn.commit()
+                return True
+            self._conn.rollback()
+            return False
+        except UndefinedTable:
+            self._conn.rollback()
+            return False
+
     def apply_schema(self) -> None:
+        files = sorted(MIGRATIONS_DIR.glob("*.sql"))
+        if self._schema_is_current(files):
+            return
         with self._conn.cursor() as cur:
-            for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_SCHEMA_ADVISORY_LOCK,))
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS _schema_migrations (
+                    filename TEXT PRIMARY KEY,
+                    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute("SELECT filename FROM _schema_migrations")
+            applied = {row["filename"] for row in cur.fetchall()}
+            for path in files:
+                if path.name in applied:
+                    continue
                 cur.execute(path.read_text(encoding="utf-8"))
+                cur.execute(
+                    "INSERT INTO _schema_migrations (filename) VALUES (%s)",
+                    (path.name,),
+                )
         self._conn.commit()
 
     def close(self) -> None:
