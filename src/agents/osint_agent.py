@@ -13,10 +13,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-from src.ontology.schema import Entity, EntityType, Relationship, RelationshipType, entity_from_dict
+from src.ontology.schema import Relationship, RelationshipType, entity_from_dict
 from src.ontology.schema_def import OntologySchema, load_ontology_schema
 from src.ontology.store import OntologyStore
 from src.tools.web_search import SearchResult, search_web
+from src.entity_linking.extractor import MentionExtractor
+from src.entity_linking.models import LinkStatus
+from src.entity_linking.normalizer import normalize_surface
+from src.entity_linking.service import EntityLinkingService
 
 _JSON_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 _NON_ID = re.compile(r"[^a-z0-9]+")
@@ -61,9 +65,11 @@ class OSINTAgent:
         self.store = ontology_store
         self.llm = llm
         self.schema = schema or load_ontology_schema()
+        self.run_id = ""
 
-    def run(self, query: str, max_results: int = 5) -> OSINTResult:
+    def run(self, query: str, max_results: int = 5, run_id: str = "") -> OSINTResult:
         """Execute OSINT collection for a given query."""
+        self.run_id = run_id
         result = OSINTResult(query=query)
 
         search_queries = self._generate_search_queries(query)
@@ -138,9 +144,11 @@ class OSINTAgent:
         gazetteer = self._gazetteer()
         for sr in results:
             text = (sr.title + " " + sr.content).lower()
+            matched_in_result: set[str] = set()
             for pattern, eid, etype in gazetteer:
-                if pattern not in text:
+                if pattern not in text or eid in matched_in_result:
                     continue
+                matched_in_result.add(eid)
                 if eid not in found_entities:
                     name = eid
                     if self.store:
@@ -164,40 +172,90 @@ class OSINTAgent:
     def _extract_with_schema(
         self, results: list[SearchResult]
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Ask the LLM to emit schema-typed entities and relationships, then validate."""
-        from src.agents.llm_support import invoke_llm, load_prompt
-
+        """Extract mentions/assertions, then link before any canonical write."""
         blob = "\n".join(
-            f"- {sr.title} ({sr.url}): {sr.content[:400]}" for sr in results[:8]
+            f"- {sr.title} ({sr.url}): {sr.content[:800]}" for sr in results[:8]
         )
-        catalog = self._entity_catalog()
-        raw = invoke_llm(
-            self.llm,
-            load_prompt("osint") + "\n\n" + self.schema.prompt_block(),
-            "Extract ontology objects from these OSINT snippets.\n"
-            "Use only entity types and relationship types from the schema.\n"
-            "Prefer canonical_id values from the catalog when the mention is the same object.\n"
-            "Return JSON only with keys entities and relationships.\n"
-            'entities: [{name, type, canonical_id, confidence, attributes, source_url}]\n'
-            "relationships: [{source, target, type, confidence, source_url}]\n"
-            "source/target may be a canonical_id or an entity name.\n\n"
-            f"Catalog:\n{catalog or '(empty)'}\n\nSnippets:\n{blob}",
-        )
-        payload = _parse_json_object(raw)
-        if not payload:
+        extractor = MentionExtractor(self.llm, self.schema.prompt_block())
+        mentions, assertions = extractor.extract(blob, document_id="osint_batch")
+        if not mentions:
             return [], []
+        for mention in mentions:
+            if mention.expected_types:
+                mention.attributes = self.schema.coerce_attributes(
+                    mention.expected_types[0], mention.attributes
+                )
+
+        linker = EntityLinkingService(self.store, llm=self.llm) if self.store else None
+        if not linker:
+            return [], []
+        decisions = linker.link(mentions, mode="write", persist=False)
+        for decision in decisions:
+            if decision.status == LinkStatus.NEW:
+                linker.create_canonical_entity(decision)
+            linker.persist_decision(decision, self.run_id)
+        decision_by_mention = {d.mention.mention_id: d for d in decisions}
 
         entities: list[dict[str, Any]] = []
-        for item in payload.get("entities") or []:
-            normalized = self._normalize_extracted_entity(item)
-            if normalized:
-                entities.append(normalized)
+        for decision in decisions:
+            if decision.status not in (LinkStatus.LINKED, LinkStatus.NEW) or not decision.entity_id:
+                continue
+            entity = self.store.get_entity(decision.entity_id)
+            if not entity:
+                continue
+            if normalize_surface(decision.mention.text) != normalize_surface(entity.name):
+                self.store.add_alias(
+                    entity.id,
+                    decision.mention.text,
+                    source="osint_agent",
+                    confidence=decision.confidence,
+                )
+                linker.refresh_embedding(entity.id)
+            entities.append({
+                "id": entity.id,
+                "name": entity.name,
+                "type": entity.entity_type.value,
+                "mentioned_in": [decision.mention.source_url] if decision.mention.source_url else [],
+                "mention_count": 1,
+                "confidence": decision.confidence,
+                "attributes": dict(decision.mention.attributes),
+                "link_status": decision.status.value,
+            })
 
         relationships: list[dict[str, Any]] = []
-        for item in payload.get("relationships") or []:
-            normalized = self._normalize_extracted_relationship(item, entities)
-            if normalized:
-                relationships.append(normalized)
+        for assertion in assertions:
+            source = decision_by_mention.get(assertion.source_mention_id)
+            target = (
+                decision_by_mention.get(assertion.target_mention_id)
+                if assertion.target_mention_id else None
+            )
+            rel_type = self.schema.coerce_relationship_type(assertion.predicate)
+            source_id = source.entity_id if source else None
+            target_id = target.entity_id if target else None
+            assertion_status = (
+                "confirmed" if source_id and target_id and rel_type else "pending"
+            )
+            self.store.add_assertion({
+                "run_id": self.run_id or None,
+                "source_mention_id": source.persisted_mention_id if source else None,
+                "target_mention_id": target.persisted_mention_id if target else None,
+                "subject_entity_id": source_id,
+                "object_entity_id": target_id,
+                "predicate": rel_type or assertion.predicate,
+                "value": assertion.value,
+                "confidence": assertion.confidence,
+                "source_url": assertion.source_url,
+                "evidence_text": assertion.evidence_text,
+                "status": assertion_status,
+            })
+            if assertion_status == "confirmed" and source_id != target_id:
+                relationships.append({
+                    "source": source_id,
+                    "target": target_id,
+                    "type": rel_type,
+                    "source_url": assertion.source_url,
+                    "confidence": assertion.confidence,
+                })
         return entities, relationships
 
     def _entity_catalog(self) -> str:
@@ -313,55 +371,13 @@ class OSINTAgent:
         return findings[:8]
 
     def _infer_relationships(self, results: list[SearchResult]) -> list[dict[str, Any]]:
-        """Co-occurrence edges, typed as RELATED_TO when that relation exists in the schema."""
-        rel_type = self.schema.coerce_relationship_type("RELATED_TO")
-        if not rel_type:
-            return []
-        relationships: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
-        gazetteer = self._gazetteer()
-
-        for sr in results:
-            text = (sr.title + " " + sr.content).lower()
-            entities_in_result: list[str] = []
-            for pattern, eid, _etype in gazetteer:
-                if pattern in text and eid not in entities_in_result:
-                    entities_in_result.append(eid)
-            for i, e1 in enumerate(entities_in_result):
-                for e2 in entities_in_result[i + 1:]:
-                    pair = tuple(sorted([e1, e2]))
-                    if pair in seen:
-                        continue
-                    seen.add(pair)
-                    relationships.append({
-                        "source": e1,
-                        "target": e2,
-                        "type": rel_type,
-                        "source_url": sr.url,
-                        "confidence": sr.score * 0.8,
-                    })
-        return relationships
+        """Co-occurrence remains document evidence; it is not a canonical graph edge."""
+        return []
 
     def _update_ontology(self, result: OSINTResult) -> None:
         """Write schema-valid entities and relationships into the store."""
         for item in result.extracted_entities:
             self._upsert_extracted_entity(item)
-
-        for finding in result.key_findings:
-            if not self.schema.is_entity_type(EntityType.EVENT.value):
-                break
-            existing = self.store.search(finding[:30])
-            if existing:
-                continue
-            event = Entity(
-                name=finding[:80],
-                entity_type=EntityType.EVENT,
-                description=finding,
-                source="osint_agent",
-                confidence=0.7,
-                tags=["osint_extracted"],
-            )
-            self.store.add_entity(event)
 
         for rel in result.new_relationships:
             source_id = rel.get("source")

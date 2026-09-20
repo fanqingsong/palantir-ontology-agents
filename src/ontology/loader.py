@@ -24,13 +24,16 @@ def load_sample_data(store: OntologyStore | None = None) -> OntologyStore:
     # ORGANIZATIONS
     # =========================================================================
     orgs = [
-        Organization(id="tsmc", name="TSMC", description="Taiwan Semiconductor Manufacturing Company - world's largest contract chipmaker",
+        Organization(id="tsmc", name="TSMC", canonical_name="Taiwan Semiconductor Manufacturing Company",
+                     aliases=["Taiwan Semiconductor", "台积电", "台湾积体电路制造"],
+                     description="Taiwan Semiconductor Manufacturing Company - world's largest contract chipmaker",
                      org_type="corporation", country="Taiwan", sector="semiconductor", revenue_usd=75_000_000_000,
                      tags=["critical_infrastructure", "semiconductor"]),
         Organization(id="asml", name="ASML", description="Dutch semiconductor equipment manufacturer - sole supplier of EUV lithography",
                      org_type="corporation", country="Netherlands", sector="semiconductor_equipment", revenue_usd=28_000_000_000,
                      tags=["semiconductor", "critical_supplier"]),
-        Organization(id="apple", name="Apple Inc.", description="Major TSMC customer - A-series and M-series chip fabrication",
+        Organization(id="apple", name="Apple Inc.", aliases=["Apple", "苹果公司", "AAPL"],
+                     description="Major TSMC customer - A-series and M-series chip fabrication",
                      org_type="corporation", country="USA", sector="technology", revenue_usd=394_000_000_000,
                      tags=["tsmc_customer"]),
         Organization(id="nvidia", name="NVIDIA", description="GPU design company - relies on TSMC for advanced node fabrication",
@@ -92,7 +95,8 @@ def load_sample_data(store: OntologyStore | None = None) -> OntologyStore:
     # LOCATIONS
     # =========================================================================
     locations = [
-        Location(id="taiwan_strait", name="Taiwan Strait", description="Strategic waterway between Taiwan and mainland China, 110 miles wide",
+        Location(id="taiwan_strait", name="Taiwan Strait", aliases=["台湾海峡"],
+                 description="Strategic waterway between Taiwan and mainland China, 110 miles wide",
                  latitude=24.5, longitude=119.5, location_type="strait", country="International"),
         Location(id="hsinchu", name="Hsinchu Science Park", description="TSMC primary fabrication complex - produces >90% of advanced chips",
                  latitude=24.8, longitude=120.98, location_type="industrial_park", country="Taiwan"),

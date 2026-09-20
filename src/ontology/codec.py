@@ -16,6 +16,10 @@ from src.ontology.schema import (
 def entity_to_record(entity: Entity) -> dict[str, Any]:
     payload = entity.to_dict()
     attributes = dict(payload.get("attributes") or {})
+    for key in ("canonical_name", "aliases", "language", "external_ids", "embedding"):
+        value = payload.get(key)
+        if value not in (None, "", [], {}):
+            attributes[key] = value
     for key in TYPE_SPECIFIC_FIELDS.get(entity.entity_type, ()):
         if key in payload:
             attributes[key] = payload[key]
@@ -34,6 +38,11 @@ def entity_to_record(entity: Entity) -> dict[str, Any]:
 
 def record_to_entity(record: dict[str, Any]) -> Entity:
     attributes = dict(record.get("attributes") or {})
+    identity_fields = {
+        key: attributes.pop(key)
+        for key in ("canonical_name", "aliases", "language", "external_ids", "embedding")
+        if key in attributes
+    }
     payload = {
         "id": record["id"],
         "name": record.get("name", ""),
@@ -45,6 +54,7 @@ def record_to_entity(record: dict[str, Any]) -> Entity:
         "created_at": record.get("created_at") or "",
         "attributes": {k: v for k, v in attributes.items() if k not in sum(TYPE_SPECIFIC_FIELDS.values(), ())},
     }
+    payload.update(identity_fields)
     payload.update(attributes)
     if hasattr(payload.get("created_at"), "isoformat"):
         payload["created_at"] = payload["created_at"].isoformat()

@@ -7,6 +7,7 @@ and returns state updates.
 from __future__ import annotations
 
 from datetime import datetime
+import uuid
 from typing import Any
 
 from langchain_core.messages import AIMessage
@@ -52,6 +53,8 @@ def coordinator_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
                 break
 
     store = _get_store(state)
+    run_id = state.get("run_id") or f"run_{uuid.uuid4().hex}"
+    store.start_run(run_id, query)
 
     timeline = state.get("timeline", []) or []
     timeline.append(_timeline_entry("coordinator", "started", f"Processing: {query[:80]}"))
@@ -71,6 +74,7 @@ def coordinator_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
 
     return {
         "query": query,
+        "run_id": run_id,
         "ontology_store_data": {
             "stats": store.snapshot_stats(),
             "backend": backend_mode(),
@@ -90,7 +94,7 @@ def osint_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     timeline.append(_timeline_entry("osint_collector", "started", "Web search initiated"))
 
     agent = OSINTAgent(ontology_store=store, llm=llm)
-    result = agent.run(query)
+    result = agent.run(query, run_id=state.get("run_id", ""))
 
     timeline.append(_timeline_entry(
         "osint_collector", "completed",
@@ -122,6 +126,11 @@ def graph_analyst_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
 
     return {
         "graph_results": result.to_dict(),
+        "graph_search_round": len(result.search_trace),
+        "graph_linked_entities": result.linked_entities,
+        "graph_observations": result.search_trace,
+        "graph_search_status": "stopped" if result.search_trace else "legacy_complete",
+        "graph_stop_reason": result.stop_reason,
         "timeline": timeline,
         "messages": [AIMessage(content=f"[Graph Analyst] Analysis complete. Key findings: {'; '.join(result.key_findings[:3])}")],
     }

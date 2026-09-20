@@ -26,6 +26,11 @@ class OntologyStore:
     def add_entity(self, entity: Entity) -> str:
         return self._backend.add_entity(entity)
 
+    def start_run(self, run_id: str, query: str) -> None:
+        method = getattr(self._backend, "start_run", None)
+        if callable(method):
+            method(run_id, query)
+
     def get_entity(self, entity_id: str) -> Optional[Entity]:
         return self._backend.get_entity(entity_id)
 
@@ -49,6 +54,72 @@ class OntologyStore:
 
     def search(self, query: str) -> list[Entity]:
         return self._backend.search(query)
+
+    def add_alias(self, entity_id: str, alias: str, **metadata: Any) -> None:
+        method = getattr(self._backend, "add_alias", None)
+        if callable(method):
+            method(entity_id, alias, **metadata)
+
+    def aliases_for(self, entity_id: str) -> list[str]:
+        method = getattr(self._backend, "aliases_for", None)
+        if callable(method):
+            return list(method(entity_id))
+        entity = self.get_entity(entity_id)
+        return list(entity.aliases) if entity else []
+
+    def search_entity_candidates(
+        self,
+        query: str,
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        method = getattr(self._backend, "search_entity_candidates", None)
+        if callable(method):
+            return list(method(query, entity_types, limit))
+        return [
+            {"entity": entity, "exact_score": 0.0, "fuzzy_score": 0.5}
+            for entity in self.search(query)[:limit]
+        ]
+
+    def record_mention(self, payload: dict[str, Any]) -> Optional[int]:
+        method = getattr(self._backend, "record_mention", None)
+        return int(method(payload)) if callable(method) else None
+
+    def enqueue_linking_review(
+        self, mention_id: int, candidates: list[dict[str, Any]]
+    ) -> Optional[int]:
+        method = getattr(self._backend, "enqueue_linking_review", None)
+        return int(method(mention_id, candidates)) if callable(method) else None
+
+    def list_linking_reviews(self, status: str = "pending") -> list[dict[str, Any]]:
+        method = getattr(self._backend, "list_linking_reviews", None)
+        return list(method(status)) if callable(method) else []
+
+    def resolve_linking_review(
+        self, review_id: int, status: str, entity_id: Optional[str], notes: str = ""
+    ) -> None:
+        method = getattr(self._backend, "resolve_linking_review", None)
+        if callable(method):
+            method(review_id, status, entity_id, notes)
+
+    def add_assertion(self, payload: dict[str, Any]) -> Optional[int]:
+        method = getattr(self._backend, "add_assertion", None)
+        return int(method(payload)) if callable(method) else None
+
+    def save_embedding(
+        self, entity_id: str, model: str, embedding: list[float], content_hash: str
+    ) -> None:
+        method = getattr(self._backend, "save_embedding", None)
+        if callable(method):
+            method(entity_id, model, embedding, content_hash)
+
+    def graph_search_backend(self) -> Any:
+        method = getattr(self._backend, "graph_search_backend", None)
+        if callable(method):
+            return method()
+        if self._backend.__class__.__name__ == "Neo4jBackend":
+            return self._backend
+        raise RuntimeError("Agentic graph search requires the Neo4j or dual backend")
 
     def get_neighbors(
         self,

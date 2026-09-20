@@ -170,7 +170,30 @@ sequenceDiagram
   Web->>Store: search(finding) then maybe add_entity(EVENT)
 ```
 
-### Graph Analyst: the graph *is* the analysis
+### Graph Analyst: agent-controlled graph search
+
+In `GRAPH_SEARCH_MODE=agentic` (the Compose default), Graph Analyst first extracts
+query mentions, resolves them through the same Entity Linking service used by
+OSINT, and then controls a bounded Neo4j search loop:
+
+```text
+understand query → link entities → plan Cypher → validate → execute
+       ↑                                                   ↓
+       └──────────── observe / re-plan / stop ─────────────┘
+```
+
+Candidate retrieval combines canonical names, multilingual aliases, fuzzy
+matching, Neo4j full-text search, optional embeddings, type constraints, and
+graph coherence. Ambiguous and NIL mentions are recorded in Postgres for
+review instead of being silently inserted.
+
+Generated Cypher passes through a read-only gateway: write/admin clauses and
+procedures are rejected, paths must be bounded, values must be parameterized,
+and every query must have a capped `LIMIT`. Neo4j is required for agentic mode;
+`GRAPH_SEARCH_MODE=auto` retains the deterministic algorithms below as a
+memory/Postgres development fallback.
+
+### Deterministic graph analysis fallback
 
 Without a store, `run()` returns immediately (`"No ontology store available"`). With one, `src/agents/graph_agent.py` plus `src/tools/ontology_tools.py` do seven read-only steps:
 

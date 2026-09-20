@@ -46,6 +46,11 @@ class Entity:
 
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     name: str = ""
+    canonical_name: str = ""
+    aliases: list[str] = field(default_factory=list)
+    language: str = ""
+    external_ids: dict[str, str] = field(default_factory=dict)
+    embedding: list[float] = field(default_factory=list)
     entity_type: EntityType = EntityType.ORGANIZATION
     description: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
@@ -56,6 +61,8 @@ class Entity:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        if not d["canonical_name"]:
+            d["canonical_name"] = self.name
         d["entity_type"] = self.entity_type.value
         return d
 

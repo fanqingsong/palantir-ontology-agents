@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from difflib import SequenceMatcher
 from typing import Any, Optional
 
 from src.ontology.graph_ops import (
@@ -19,6 +20,7 @@ from src.ontology.schema import (
     RelationshipType,
     entity_from_dict,
 )
+from src.entity_linking.normalizer import normalize_surface
 
 
 class MemoryBackend:
@@ -30,6 +32,10 @@ class MemoryBackend:
         self._outgoing: dict[str, list[str]] = defaultdict(list)
         self._incoming: dict[str, list[str]] = defaultdict(list)
         self._type_index: dict[EntityType, set[str]] = defaultdict(set)
+        self._aliases: dict[str, list[str]] = defaultdict(list)
+        self._mentions: list[dict[str, Any]] = []
+        self._reviews: list[dict[str, Any]] = []
+        self._assertions: list[dict[str, Any]] = []
 
     def add_entity(self, entity: Entity) -> str:
         self._entities[entity.id] = entity
@@ -91,6 +97,122 @@ class MemoryBackend:
             if query_lower in entity.name.lower() or query_lower in entity.description.lower():
                 results.append(entity)
         return results
+
+    def add_alias(self, entity_id: str, alias: str, **_: Any) -> None:
+        entity = self.get_entity(entity_id)
+        if not entity:
+            return
+        normalized = normalize_surface(alias)
+        existing = {normalize_surface(value) for value in self._aliases[entity_id]}
+        if normalized and normalized not in existing:
+            self._aliases[entity_id].append(alias)
+        entity.aliases = list(self._aliases[entity_id])
+
+    def aliases_for(self, entity_id: str) -> list[str]:
+        entity = self.get_entity(entity_id)
+        return list(self._aliases.get(entity_id) or (entity.aliases if entity else []))
+
+    def search_entity_candidates(
+        self,
+        query: str,
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        normalized = normalize_surface(query)
+        candidates = []
+        for entity in self._entities.values():
+            if entity_types and entity.entity_type.value not in entity_types:
+                continue
+            names = [
+                entity.name,
+                entity.canonical_name,
+                *entity.aliases,
+                *self._aliases.get(entity.id, []),
+            ]
+            scored = [
+                (
+                    value,
+                    1.0 if normalize_surface(value) == normalized else
+                    SequenceMatcher(None, normalize_surface(value), normalized).ratio(),
+                )
+                for value in names if value
+            ]
+            if not scored:
+                continue
+            matched, score = max(scored, key=lambda item: item[1])
+            if score >= 0.15:
+                candidates.append({
+                    "entity": entity,
+                    "matched_alias": matched if matched != entity.name else None,
+                    "exact_score": 1.0 if score == 1.0 else 0.0,
+                    "fuzzy_score": score,
+                })
+        candidates.sort(
+            key=lambda item: (item["exact_score"], item["fuzzy_score"]), reverse=True
+        )
+        return candidates[:limit]
+
+    def record_mention(self, payload: dict[str, Any]) -> int:
+        mention_id = len(self._mentions) + 1
+        self._mentions.append({"id": mention_id, **payload})
+        return mention_id
+
+    def enqueue_linking_review(
+        self, mention_id: int, candidates: list[dict[str, Any]]
+    ) -> int:
+        review_id = len(self._reviews) + 1
+        self._reviews.append({
+            "id": review_id,
+            "mention_id": mention_id,
+            "status": "pending",
+            "candidates": candidates,
+        })
+        return review_id
+
+    def list_linking_reviews(self, status: str = "pending") -> list[dict[str, Any]]:
+        rows = []
+        for item in self._reviews:
+            if item["status"] != status:
+                continue
+            mention = next(
+                (value for value in self._mentions if value["id"] == item["mention_id"]),
+                {},
+            )
+            rows.append({**item, **{
+                key: mention.get(key)
+                for key in ("surface_form", "context", "source_url", "entity_type_hint")
+            }})
+        return rows
+
+    def resolve_linking_review(
+        self, review_id: int, status: str, entity_id: Optional[str], notes: str = ""
+    ) -> None:
+        for review in self._reviews:
+            if review["id"] == review_id:
+                review.update(status=status, resolved_entity_id=entity_id, notes=notes)
+                if entity_id:
+                    mention = next(
+                        (
+                            item for item in self._mentions
+                            if item["id"] == review["mention_id"]
+                        ),
+                        None,
+                    )
+                    if mention:
+                        self.add_alias(entity_id, mention["surface_form"])
+                break
+
+    def add_assertion(self, payload: dict[str, Any]) -> int:
+        assertion_id = len(self._assertions) + 1
+        self._assertions.append({"id": assertion_id, **payload})
+        return assertion_id
+
+    def save_embedding(
+        self, entity_id: str, model: str, embedding: list[float], content_hash: str
+    ) -> None:
+        entity = self.get_entity(entity_id)
+        if entity:
+            entity.embedding = list(embedding)
 
     def get_neighbors(
         self,

@@ -41,6 +41,7 @@ class AgentState(MessagesState):
     """
     # Query
     query: str = ""
+    run_id: str = ""
 
     # Ontology store (serialized)
     ontology_store_data: Annotated[dict[str, Any], merge_dict] = {}
@@ -48,6 +49,11 @@ class AgentState(MessagesState):
     # Agent results
     osint_results: Annotated[dict[str, Any], merge_dict] = {}
     graph_results: Annotated[dict[str, Any], merge_dict] = {}
+    graph_search_round: int = 0
+    graph_linked_entities: Annotated[list[dict[str, Any]], operator.add] = []
+    graph_observations: Annotated[list[dict[str, Any]], operator.add] = []
+    graph_search_status: str = "pending"
+    graph_stop_reason: str = ""
     threat_results: Annotated[dict[str, Any], merge_dict] = {}
     briefing: Annotated[dict[str, Any], merge_dict] = {}
 

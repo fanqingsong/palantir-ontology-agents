@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import hashlib
+import time
+import re
 from typing import Any, Optional
 
 from src.ontology.codec import entity_to_record, record_to_entity, record_to_relationship
@@ -19,6 +23,7 @@ from src.ontology.schema import (
     Relationship,
     entity_from_dict,
 )
+from src.ontology.cypher_readonly import CypherPolicy, validate_readonly_cypher
 
 _ALLOWED_REL_TYPES = {t.value for t in RelationshipType}
 _TYPE_LABELS = {
@@ -41,6 +46,11 @@ class Neo4jBackend:
 
         self._driver = GraphDatabase.driver(uri, auth=(user, password))
         self._ensure_constraints()
+        try:
+            self.ensure_vector_index(int(os.environ.get("EMBEDDING_DIMENSION", "1536")))
+        except Exception:
+            # Full-text graph search remains available when vector indexes are unsupported.
+            pass
 
     def close(self) -> None:
         self._driver.close()
@@ -50,9 +60,21 @@ class Neo4jBackend:
             session.run(
                 "CREATE CONSTRAINT entity_id IF NOT EXISTS FOR (n:Entity) REQUIRE n.id IS UNIQUE"
             )
+            session.run(
+                """
+                CREATE FULLTEXT INDEX entity_text IF NOT EXISTS
+                FOR (n:Entity) ON EACH [n.name, n.canonical_name, n.aliases, n.description]
+                """
+            )
+
+    def verify_connectivity(self) -> None:
+        self._driver.verify_connectivity()
 
     def _entity_props(self, entity: Entity) -> dict[str, Any]:
         rec = entity_to_record(entity)
+        stored_attributes = dict(rec["attributes"])
+        for key in ("canonical_name", "aliases", "language", "external_ids", "embedding"):
+            stored_attributes.pop(key, None)
         props = {
             "id": rec["id"],
             "name": rec["name"],
@@ -62,9 +84,15 @@ class Neo4jBackend:
             "source": rec["source"],
             "confidence": rec["confidence"],
             "created_at": rec["created_at"] or "",
-            "attributes_json": json.dumps(rec["attributes"]),
+            "attributes_json": json.dumps(stored_attributes),
+            "canonical_name": entity.canonical_name or entity.name,
+            "aliases": list(entity.aliases),
+            "language": entity.language,
+            "external_ids_json": json.dumps(entity.external_ids),
         }
-        for key, value in rec["attributes"].items():
+        if entity.embedding:
+            props["embedding"] = list(entity.embedding)
+        for key, value in stored_attributes.items():
             if value is None or isinstance(value, (str, int, float, bool)):
                 props[key] = value
             elif isinstance(value, list) and all(isinstance(x, (str, int, float)) for x in value):
@@ -79,6 +107,14 @@ class Neo4jBackend:
             attributes = json.loads(raw_attrs)
         except json.JSONDecodeError:
             attributes = {}
+        for key in ("canonical_name", "aliases", "language", "embedding"):
+            if key in data:
+                attributes[key] = data[key]
+        raw_external_ids = data.pop("external_ids_json", "") or "{}"
+        try:
+            attributes["external_ids"] = json.loads(raw_external_ids)
+        except json.JSONDecodeError:
+            attributes["external_ids"] = {}
         data["attributes"] = attributes
         data.update({k: v for k, v in attributes.items() if k not in data})
         return record_to_entity(data)
@@ -195,6 +231,124 @@ class Neo4jBackend:
             )
             return [self._node_to_entity(rec["n"]) for rec in result]
 
+    def search_entity_candidates(
+        self,
+        query: str,
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+        embedding: Optional[list[float]] = None,
+    ) -> list[dict[str, Any]]:
+        candidates: dict[str, dict[str, Any]] = {}
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                CALL db.index.fulltext.queryNodes('entity_text', $search_query, {limit: $limit})
+                YIELD node, score
+                WHERE size($types) = 0 OR node.entity_type IN $types
+                RETURN node, score
+                """,
+                search_query=_escape_fulltext_query(query),
+                types=entity_types or [],
+                limit=limit,
+            )
+            for rec in result:
+                entity = self._node_to_entity(rec["node"])
+                candidates[entity.id] = {
+                    "entity": entity,
+                    "fulltext_score": float(rec["score"] or 0),
+                    "vector_score": 0.0,
+                }
+            if embedding:
+                index_name = os.environ.get("NEO4J_VECTOR_INDEX", "entity_embedding")
+                try:
+                    vector_rows = session.run(
+                        """
+                        CALL db.index.vector.queryNodes($index, $limit, $embedding)
+                        YIELD node, score
+                        WHERE size($types) = 0 OR node.entity_type IN $types
+                        RETURN node, score
+                        """,
+                        index=index_name,
+                        limit=limit,
+                        embedding=embedding,
+                        types=entity_types or [],
+                    )
+                    for rec in vector_rows:
+                        entity = self._node_to_entity(rec["node"])
+                        item = candidates.setdefault(
+                            entity.id,
+                            {"entity": entity, "fulltext_score": 0.0, "vector_score": 0.0},
+                        )
+                        item["vector_score"] = float(rec["score"] or 0)
+                except Exception:
+                    pass
+        return sorted(
+            candidates.values(),
+            key=lambda item: max(item["fulltext_score"], item["vector_score"]),
+            reverse=True,
+        )[:limit]
+
+    def ensure_vector_index(self, dimensions: int) -> None:
+        name = os.environ.get("NEO4J_VECTOR_INDEX", "entity_embedding")
+        if not name.replace("_", "").isalnum():
+            raise ValueError("Invalid Neo4j vector index name")
+        dimensions = int(dimensions)
+        with self._driver.session() as session:
+            session.run(
+                f"""
+                CREATE VECTOR INDEX {name} IF NOT EXISTS
+                FOR (n:Entity) ON n.embedding
+                OPTIONS {{indexConfig: {{
+                  `vector.dimensions`: {dimensions},
+                  `vector.similarity_function`: 'cosine'
+                }}}}
+                """
+            )
+
+    def execute_readonly(
+        self,
+        cypher: str,
+        parameters: Optional[dict[str, Any]] = None,
+        *,
+        max_rows: int = 200,
+        timeout_seconds: int = 10,
+    ) -> dict[str, Any]:
+        started = time.monotonic()
+        params = validate_readonly_cypher(
+            cypher,
+            parameters,
+            CypherPolicy(max_rows=max_rows),
+        )
+        from neo4j import Query
+
+        with self._driver.session(default_access_mode="READ") as session:
+            result = session.run(
+                Query(cypher, timeout=timeout_seconds),
+                params,
+            )
+            keys = list(result.keys())
+            rows = []
+            truncated = False
+            for index, record in enumerate(result):
+                if index >= max_rows:
+                    truncated = True
+                    break
+                rows.append({
+                    key: _serialize_neo4j_value(record[key])
+                    for key in keys
+                })
+        return {
+            "columns": keys,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+            "audit": {
+                "cypher_hash": hashlib.sha256(cypher.encode("utf-8")).hexdigest(),
+                "parameter_keys": sorted(params),
+                "duration_ms": round((time.monotonic() - started) * 1000, 2),
+            },
+        }
+
     def get_neighbors(
         self,
         entity_id: str,
@@ -300,3 +454,47 @@ class Neo4jBackend:
         with self._driver.session() as session:
             result = session.run("MATCH ()-[r]->() RETURN r, type(r) AS rel_type")
             return [self._rel_to_relationship(rec["r"], rec["rel_type"]) for rec in result]
+
+
+def _serialize_neo4j_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _serialize_neo4j_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_serialize_neo4j_value(item) for item in value]
+    if hasattr(value, "nodes") and hasattr(value, "relationships"):
+        return {
+            "nodes": [_serialize_neo4j_value(node) for node in value.nodes],
+            "relationships": [
+                {
+                    "type": rel.type,
+                    **{str(k): _serialize_neo4j_value(v) for k, v in dict(rel).items()},
+                }
+                for rel in value.relationships
+            ],
+        }
+    if hasattr(value, "items"):
+        payload = {str(key): _serialize_neo4j_value(item) for key, item in dict(value).items()}
+        labels = getattr(value, "labels", None)
+        if labels:
+            payload["_labels"] = sorted(labels)
+        rel_type = getattr(value, "type", None)
+        if rel_type:
+            payload["_type"] = rel_type
+        return payload
+    if hasattr(value, "iso_format"):
+        return value.iso_format()
+    return str(value)
+
+
+def _escape_fulltext_query(value: str) -> str:
+    tokens = [
+        token for token in re.split(r"\s+", value.strip())
+        if token
+    ]
+    escaped = [
+        re.sub(r'([+\-!(){}\[\]^"~*?:\\/]|&&|\|\|)', r"\\\1", token)
+        for token in tokens
+    ]
+    return " ".join(escaped) or '""'

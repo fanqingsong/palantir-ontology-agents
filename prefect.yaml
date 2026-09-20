@@ -18,3 +18,8 @@ deployments:
       name: default-process-pool
     schedules:
       - interval: 300
+
+  - name: reindex-entity-embeddings
+    entrypoint: src/workers/prefect_flows.py:reindex_entity_embeddings
+    work_pool:
+      name: default-process-pool

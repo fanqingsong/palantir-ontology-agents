@@ -221,6 +221,77 @@ def render_graph_panel(graph_results: dict):
         for hub in hub_entities:
             st.markdown(f"- **{hub['name']}** ({hub['type']}) - {hub['degree']} connections")
 
+    linked = graph_results.get("linked_entities", [])
+    trace = graph_results.get("search_trace", [])
+    with st.expander("Agentic Graph Search Trace", expanded=False):
+        st.caption(
+            f"{len(linked)} linked entities · {len(trace)} Cypher rounds · "
+            f"stop: {graph_results.get('stop_reason') or 'n/a'}"
+        )
+        for item in trace:
+            st.markdown(f"**Round {item.get('round')} — {item.get('goal') or 'Search'}**")
+            st.code(item.get("cypher", ""), language="cypher")
+            if item.get("error"):
+                st.error(item["error"])
+            else:
+                audit = item.get("audit") or {}
+                st.caption(
+                    f"{item.get('row_count', 0)} rows · "
+                    f"{audit.get('duration_ms', 0)} ms · "
+                    f"hash `{str(audit.get('cypher_hash', ''))[:12]}`"
+                )
+
+
+def render_linking_review_queue():
+    """Render pending entity-linking decisions backed by Postgres."""
+    try:
+        store = get_shared_store()
+        reviews = store.list_linking_reviews()
+    except Exception as exc:
+        st.sidebar.caption(f"Entity review unavailable: {exc}")
+        return
+    with st.sidebar.expander(f"Entity Linking Reviews ({len(reviews)})", expanded=False):
+        if not reviews:
+            st.caption("No pending reviews.")
+        for review in reviews[:20]:
+            st.markdown(f"**{review.get('surface_form', 'Unknown mention')}**")
+            candidates = review.get("candidates") or []
+            options = {
+                f"{item.get('name')} ({item.get('entity_type')}) · {item.get('score', 0):.2f}":
+                    item.get("entity_id")
+                for item in candidates
+            }
+            choice = st.selectbox(
+                "Canonical entity",
+                ["Reject / keep unresolved", "Create new canonical entity", *options],
+                key=f"link_review_choice_{review['id']}",
+            )
+            if st.button("Resolve", key=f"link_review_submit_{review['id']}"):
+                entity_id = options.get(choice)
+                if choice == "Create new canonical entity":
+                    from src.entity_linking.models import LinkDecision, LinkStatus, Mention
+                    from src.entity_linking.service import EntityLinkingService
+
+                    type_hint = review.get("entity_type_hint")
+                    decision = LinkDecision(
+                        mention=Mention(
+                            text=review.get("surface_form", ""),
+                            expected_types=[type_hint] if type_hint else [],
+                            context=review.get("context", ""),
+                            source_url=review.get("source_url", ""),
+                            confidence=1.0,
+                        ),
+                        status=LinkStatus.NEW,
+                        confidence=1.0,
+                    )
+                    entity_id = EntityLinkingService(store).create_canonical_entity(decision).id
+                store.resolve_linking_review(
+                    int(review["id"]),
+                    "approved" if entity_id else "rejected",
+                    entity_id,
+                )
+                st.rerun()
+
 
 def render_threat_panel(threat_results: dict):
     """Render Threat Assessment results panel."""
@@ -285,6 +356,7 @@ def main():
 
     # Sidebar
     st.sidebar.title("Control Panel")
+    render_linking_review_queue()
 
     # Default demo query
     default_query = (

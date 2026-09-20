@@ -8,6 +8,11 @@ import uuid
 from prefect import flow, get_run_logger, runtime, task
 
 from src.ontology.outbox_projector import build_projector_from_env
+from src.entity_linking.embeddings import (
+    EmbeddingProvider,
+    content_hash,
+    entity_embedding_text,
+)
 
 
 def _worker_id() -> str:
@@ -66,6 +71,36 @@ def reconcile_pending_outbox(batch_size: int | None = None) -> int:
                 if trigger_project_outbox_run(oid):
                     triggered += 1
         return triggered
+    finally:
+        projector.postgres.close()
+        projector.neo4j.close()
+
+
+@flow(name="reindex-entity-embeddings")
+def reindex_entity_embeddings(batch_size: int = 100) -> int:
+    """Backfill multilingual embeddings into Postgres and the Neo4j projection."""
+    logger = get_run_logger()
+    projector = build_projector_from_env()
+    provider = EmbeddingProvider()
+    if not provider.available:
+        raise RuntimeError("OPENAI_API_KEY is required for embedding reindex")
+    try:
+        entities = projector.postgres.all_entities()[:batch_size]
+        texts = [entity_embedding_text(entity) for entity in entities]
+        vectors = provider.embed_documents(texts)
+        projector.neo4j.ensure_vector_index(provider.dimensions)
+        indexed = 0
+        for entity, text, vector in zip(entities, texts, vectors):
+            if not vector:
+                continue
+            entity.embedding = vector
+            projector.postgres.save_embedding(
+                entity.id, provider.model, vector, content_hash(text)
+            )
+            projector.neo4j.add_entity(entity)
+            indexed += 1
+        logger.info("Indexed %s entity embeddings", indexed)
+        return indexed
     finally:
         projector.postgres.close()
         projector.neo4j.close()

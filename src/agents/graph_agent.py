@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+import os
 from typing import Any, Optional
 
 from src.ontology.schema_def import OntologySchema, instance_gazetteer, load_ontology_schema
@@ -30,6 +31,12 @@ class GraphAnalysisResult:
     hub_entities: list[dict[str, Any]] = field(default_factory=list)
     traversal_stats: dict[str, Any] = field(default_factory=dict)
     key_findings: list[str] = field(default_factory=list)
+    linked_entities: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_entities: list[dict[str, Any]] = field(default_factory=list)
+    search_trace: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    stop_reason: str = ""
+    schema_version: str = "legacy-v1"
     timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -41,6 +48,12 @@ class GraphAnalysisResult:
             "hub_entities": self.hub_entities,
             "traversal_stats": self.traversal_stats,
             "key_findings": self.key_findings,
+            "linked_entities": self.linked_entities,
+            "unresolved_entities": self.unresolved_entities,
+            "search_trace": self.search_trace,
+            "evidence": self.evidence,
+            "stop_reason": self.stop_reason,
+            "schema_version": self.schema_version,
             "timestamp": self.timestamp,
         }
 
@@ -73,6 +86,24 @@ class GraphAnalystAgent:
         """
         if not self.store:
             return GraphAnalysisResult(query=query, key_findings=["No ontology store available"])
+
+        mode = os.environ.get("GRAPH_SEARCH_MODE", "auto").strip().lower()
+        if self.llm and mode != "legacy":
+            try:
+                self.store.graph_search_backend()
+            except Exception:
+                if mode == "agentic":
+                    raise
+            else:
+                from src.graph.graph_search_workflow import build_graph_search_workflow
+
+                workflow = build_graph_search_workflow(self.store, self.llm, self.schema)
+                state = workflow.invoke({"query": query})
+                payload = state["result"]
+                return GraphAnalysisResult(**{
+                    key: value for key, value in payload.items()
+                    if key in GraphAnalysisResult.__dataclass_fields__
+                })
 
         result = GraphAnalysisResult(query=query)
 

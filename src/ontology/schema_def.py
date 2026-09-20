@@ -38,6 +38,7 @@ class OntologySchema:
     dependency_relationship_types: tuple[str, ...]
     threat_entity_type: str
     exposure_entity_types: tuple[str, ...]
+    linking_config: dict[str, Any]
 
     def is_entity_type(self, name: str) -> bool:
         return (name or "").strip().lower() in self.entity_types
@@ -114,7 +115,13 @@ def instance_gazetteer(store: Any, schema: OntologySchema) -> list[tuple[str, st
         etype = entity.entity_type.value
         if not schema.is_entity_type(etype):
             continue
-        candidates = {entity.id, entity.name, entity.id.replace("_", " ")}
+        candidates = {
+            entity.id,
+            entity.name,
+            entity.canonical_name,
+            entity.id.replace("_", " "),
+            *entity.aliases,
+        }
         for raw in candidates:
             pattern = raw.strip().lower()
             if len(pattern) < 3:
@@ -219,6 +226,7 @@ def load_ontology_schema(path: str | Path | None = None) -> OntologySchema:
         dependency_relationship_types=dependency_relationship_types,
         threat_entity_type=threat_entity_type,
         exposure_entity_types=exposure_entity_types,
+        linking_config=dict(payload.get("entity_linking") or {}),
     )
 
 

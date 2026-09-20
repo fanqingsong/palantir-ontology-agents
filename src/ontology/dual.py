@@ -45,6 +45,9 @@ class DualBackend:
         self._maybe_flush()
         return entity_id
 
+    def start_run(self, run_id: str, query: str) -> None:
+        self.postgres.start_run(run_id, query)
+
     def add_relationship(self, relationship: Relationship) -> str:
         rel_id = self.postgres.add_relationship(relationship)
         self._maybe_flush()
@@ -73,6 +76,50 @@ class DualBackend:
 
     def search(self, query: str) -> list[Entity]:
         return self.postgres.search(query)
+
+    def add_alias(self, entity_id: str, alias: str, **metadata: Any) -> None:
+        self.postgres.add_alias(entity_id, alias, **metadata)
+        self._maybe_flush()
+
+    def aliases_for(self, entity_id: str) -> list[str]:
+        return self.postgres.aliases_for(entity_id)
+
+    def search_entity_candidates(
+        self,
+        query: str,
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        return self.postgres.search_entity_candidates(query, entity_types, limit)
+
+    def record_mention(self, payload: dict[str, Any]) -> int:
+        return self.postgres.record_mention(payload)
+
+    def enqueue_linking_review(
+        self, mention_id: int, candidates: list[dict[str, Any]]
+    ) -> int:
+        return self.postgres.enqueue_linking_review(mention_id, candidates)
+
+    def list_linking_reviews(self, status: str = "pending") -> list[dict[str, Any]]:
+        return self.postgres.list_linking_reviews(status)
+
+    def resolve_linking_review(
+        self, review_id: int, status: str, entity_id: Optional[str], notes: str = ""
+    ) -> None:
+        self.postgres.resolve_linking_review(review_id, status, entity_id, notes)
+
+    def add_assertion(self, payload: dict[str, Any]) -> int:
+        return self.postgres.add_assertion(payload)
+
+    def save_embedding(
+        self, entity_id: str, model: str, embedding: list[float], content_hash: str
+    ) -> None:
+        self.postgres.save_embedding(entity_id, model, embedding, content_hash)
+
+    def graph_search_backend(self) -> Neo4jBackend:
+        self.flush_outbox()
+        self.neo4j.verify_connectivity()
+        return self.neo4j
 
     def get_neighbors(
         self,

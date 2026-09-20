@@ -116,6 +116,21 @@ graph_analysis:
   exposure_entity_types:
     - organization
 
+entity_linking:
+  candidate_limit: 20
+  query_auto_link_threshold: 0.72
+  write_auto_link_threshold: 0.90
+  new_entity_min_confidence: 0.90
+  review_gap: 0.08
+  coherence_max_hops: 3
+  enabled_signals:
+    - exact
+    - fulltext
+    - fuzzy
+    - vector
+    - type
+    - graph_coherence
+
 # Common attributes for all entities
 base_attributes:
   - name: id

@@ -139,3 +139,21 @@ class TestOSINTAgent:
         ]
         ids = {e["id"] for e in agent._extract_entities(results)}
         assert ids == {"org1", "loc1", "threat1"}
+
+    def test_multilingual_alias_resolves_to_one_canonical_entity(
+        self, sample_ontology_store
+    ):
+        from src.tools.web_search import SearchResult
+
+        before = sample_ontology_store.entity_count
+        agent = OSINTAgent(ontology_store=sample_ontology_store)
+        entities = agent._extract_entities([
+            SearchResult(
+                title="台积电供应链更新",
+                url="http://example.com/tsmc-cn",
+                content="Taiwan Semiconductor（台积电）更新先进制程计划。",
+                score=0.9,
+            )
+        ])
+        assert {entity["id"] for entity in entities} == {"tsmc"}
+        assert sample_ontology_store.entity_count == before

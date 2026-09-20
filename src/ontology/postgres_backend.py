@@ -22,6 +22,7 @@ from src.ontology.graph_ops import (
     traverse,
 )
 from src.ontology.schema import Entity, EntityType, Relationship, RelationshipType
+from src.entity_linking.normalizer import normalize_surface
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
 
@@ -43,6 +44,18 @@ class PostgresBackend:
 
     def close(self) -> None:
         self._conn.close()
+
+    def start_run(self, run_id: str, query: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO runs (run_id, query, status)
+                VALUES (%s, %s, 'running')
+                ON CONFLICT (run_id) DO NOTHING
+                """,
+                (run_id, query),
+            )
+        self._conn.commit()
 
     def _upsert_entity_row(self, entity: Entity) -> None:
         rec = entity_to_record(entity)
@@ -68,6 +81,22 @@ class PostgresBackend:
                 """,
                 {**rec, "attributes": Json(rec["attributes"])},
             )
+            for alias in entity.aliases:
+                normalized = normalize_surface(alias)
+                if normalized:
+                    cur.execute(
+                        """
+                        INSERT INTO entity_aliases (
+                            entity_id, alias, normalized_alias, language,
+                            alias_type, confidence, source, verified
+                        ) VALUES (%s, %s, %s, %s, 'synonym', %s, %s, %s)
+                        ON CONFLICT (entity_id, normalized_alias) DO NOTHING
+                        """,
+                        (
+                            entity.id, alias, normalized, entity.language,
+                            entity.confidence, entity.source, entity.source == "manual",
+                        ),
+                    )
 
     def _insert_outbox(self, op: str, payload: dict[str, Any]) -> None:
         with self._conn.cursor() as cur:
@@ -193,6 +222,282 @@ class PostgresBackend:
             )
             rows = cur.fetchall()
         return [record_to_entity(row) for row in rows]
+
+    def add_alias(
+        self,
+        entity_id: str,
+        alias: str,
+        *,
+        language: str = "",
+        alias_type: str = "synonym",
+        confidence: float = 1.0,
+        source: str = "manual",
+        verified: bool = False,
+    ) -> None:
+        normalized = normalize_surface(alias)
+        if not normalized:
+            return
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO entity_aliases (
+                        entity_id, alias, normalized_alias, language, alias_type,
+                        confidence, source, verified
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (entity_id, normalized_alias) DO UPDATE SET
+                        confidence = GREATEST(entity_aliases.confidence, EXCLUDED.confidence),
+                        verified = entity_aliases.verified OR EXCLUDED.verified
+                    """,
+                    (
+                        entity_id, alias, normalized, language, alias_type,
+                        confidence, source, verified,
+                    ),
+                )
+                cur.execute(
+                    """
+                    UPDATE entities
+                    SET attributes = jsonb_set(
+                        attributes,
+                        '{aliases}',
+                        (
+                            SELECT to_jsonb(ARRAY(
+                                SELECT DISTINCT a.alias
+                                FROM entity_aliases a
+                                WHERE a.entity_id = %s
+                                ORDER BY a.alias
+                            ))
+                        ),
+                        true
+                    ), updated_at = NOW()
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (entity_id, entity_id),
+                )
+                row = cur.fetchone()
+            if row and self.record_outbox:
+                self._insert_outbox("upsert_entity", record_to_entity(row).to_dict())
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    def aliases_for(self, entity_id: str) -> list[str]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT alias FROM entity_aliases WHERE entity_id = %s ORDER BY alias",
+                (entity_id,),
+            )
+            return [str(row["alias"]) for row in cur.fetchall()]
+
+    def search_entity_candidates(
+        self,
+        query: str,
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        normalized = normalize_surface(query)
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH candidates AS (
+                    SELECT e.*, NULL::text AS matched_alias,
+                           GREATEST(
+                               similarity(LOWER(e.name), %s),
+                               similarity(LOWER(COALESCE(e.attributes->>'canonical_name', '')), %s)
+                           ) AS fuzzy_score,
+                           CASE
+                             WHEN LOWER(e.name) = %s THEN 1.0
+                             WHEN LOWER(COALESCE(e.attributes->>'canonical_name', '')) = %s THEN 1.0
+                             ELSE 0.0
+                           END AS exact_score
+                    FROM entities e
+                    WHERE (%s::text[] IS NULL OR e.entity_type = ANY(%s::text[]))
+                    UNION ALL
+                    SELECT e.*, a.alias AS matched_alias,
+                           similarity(a.normalized_alias, %s) AS fuzzy_score,
+                           CASE WHEN a.normalized_alias = %s THEN 1.0 ELSE 0.0 END AS exact_score
+                    FROM entity_aliases a
+                    JOIN entities e ON e.id = a.entity_id
+                    WHERE (%s::text[] IS NULL OR e.entity_type = ANY(%s::text[]))
+                )
+                SELECT * FROM (
+                    SELECT DISTINCT ON (id) *
+                    FROM candidates
+                    WHERE exact_score > 0 OR fuzzy_score >= 0.15
+                    ORDER BY id, exact_score DESC, fuzzy_score DESC
+                ) ranked
+                ORDER BY exact_score DESC, fuzzy_score DESC
+                LIMIT %s
+                """,
+                (
+                    normalized, normalized, normalized, normalized,
+                    entity_types, entity_types,
+                    normalized, normalized, entity_types, entity_types, limit,
+                ),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "entity": record_to_entity(row),
+                "matched_alias": row.get("matched_alias"),
+                "exact_score": float(row.get("exact_score") or 0),
+                "fuzzy_score": float(row.get("fuzzy_score") or 0),
+            }
+            for row in rows
+        ]
+
+    def record_mention(self, payload: dict[str, Any]) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_mentions (
+                    run_id, document_id, surface_form, normalized_surface, context,
+                    entity_type_hint, resolved_entity_id, status, confidence,
+                    source_url, evidence, candidates, linker_version
+                ) VALUES (
+                    %(run_id)s, %(document_id)s, %(surface_form)s, %(normalized_surface)s,
+                    %(context)s, %(entity_type_hint)s, %(resolved_entity_id)s, %(status)s,
+                    %(confidence)s, %(source_url)s, %(evidence)s, %(candidates)s,
+                    %(linker_version)s
+                ) RETURNING id
+                """,
+                {
+                    **payload,
+                    "evidence": Json(payload.get("evidence") or {}),
+                    "candidates": Json(payload.get("candidates") or []),
+                },
+            )
+            mention_id = int(cur.fetchone()["id"])
+        self._conn.commit()
+        return mention_id
+
+    def enqueue_linking_review(
+        self, mention_id: int, candidates: list[dict[str, Any]]
+    ) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO linking_review_queue (mention_id, candidates)
+                VALUES (%s, %s) RETURNING id
+                """,
+                (mention_id, Json(candidates)),
+            )
+            review_id = int(cur.fetchone()["id"])
+        self._conn.commit()
+        return review_id
+
+    def list_linking_reviews(self, status: str = "pending") -> list[dict[str, Any]]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT q.*, m.surface_form, m.context, m.source_url, m.entity_type_hint
+                FROM linking_review_queue q
+                JOIN entity_mentions m ON m.id = q.mention_id
+                WHERE q.status = %s ORDER BY q.id
+                """,
+                (status,),
+            )
+            return list(cur.fetchall())
+
+    def resolve_linking_review(
+        self, review_id: int, status: str, entity_id: Optional[str], notes: str = ""
+    ) -> None:
+        surface_form = ""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE linking_review_queue
+                    SET status = %s, resolved_entity_id = %s, notes = %s,
+                        resolved_at = NOW()
+                    WHERE id = %s
+                    RETURNING mention_id
+                    """,
+                    (status, entity_id, notes, review_id),
+                )
+                row = cur.fetchone()
+                if row:
+                    cur.execute(
+                        """
+                        UPDATE entity_mentions
+                        SET status = %s, resolved_entity_id = %s
+                        WHERE id = %s
+                        """,
+                        ("LINKED" if entity_id else status.upper(), entity_id, row["mention_id"]),
+                    )
+                    cur.execute(
+                        "SELECT surface_form FROM entity_mentions WHERE id = %s",
+                        (row["mention_id"],),
+                    )
+                    mention = cur.fetchone()
+                    surface_form = str(mention["surface_form"]) if mention else ""
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        if entity_id and surface_form:
+            self.add_alias(
+                entity_id,
+                surface_form,
+                source="linking_review",
+                confidence=1.0,
+                verified=True,
+            )
+
+    def add_assertion(self, payload: dict[str, Any]) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_assertions (
+                    run_id, source_mention_id, target_mention_id, subject_entity_id,
+                    object_entity_id, predicate, value, confidence, source_url,
+                    evidence_text, status
+                ) VALUES (
+                    %(run_id)s, %(source_mention_id)s, %(target_mention_id)s,
+                    %(subject_entity_id)s, %(object_entity_id)s, %(predicate)s,
+                    %(value)s, %(confidence)s, %(source_url)s, %(evidence_text)s, %(status)s
+                ) RETURNING id
+                """,
+                {**payload, "value": Json(payload.get("value"))},
+            )
+            assertion_id = int(cur.fetchone()["id"])
+        self._conn.commit()
+        return assertion_id
+
+    def save_embedding(
+        self, entity_id: str, model: str, embedding: list[float], content_hash: str
+    ) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO entity_embeddings (
+                    entity_id, model, dimensions, embedding, content_hash
+                ) VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (entity_id) DO UPDATE SET
+                    model = EXCLUDED.model,
+                    dimensions = EXCLUDED.dimensions,
+                    embedding = EXCLUDED.embedding,
+                    content_hash = EXCLUDED.content_hash,
+                    updated_at = NOW()
+                """,
+                (entity_id, model, len(embedding), Json(embedding), content_hash),
+            )
+            cur.execute(
+                """
+                UPDATE entities
+                SET attributes = jsonb_set(attributes, '{embedding}', %s, true),
+                    updated_at = NOW()
+                WHERE id = %s
+                RETURNING *
+                """,
+                (Json(embedding), entity_id),
+            )
+            row = cur.fetchone()
+        if row and self.record_outbox:
+            self._insert_outbox("upsert_entity", record_to_entity(row).to_dict())
+        self._conn.commit()
 
     def get_neighbors(
         self,
