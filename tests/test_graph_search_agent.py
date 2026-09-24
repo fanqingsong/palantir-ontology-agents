@@ -48,3 +48,26 @@ def test_agent_controls_multistep_graph_search(monkeypatch):
     assert result["linked_entities"][0]["entity_id"] == "org1"
     assert len(result["search_trace"]) == 1
     assert result["stop_reason"] == "evidence sufficient"
+
+
+def test_finalize_records_analysis_step_failures(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "src.graph.graph_search_workflow.find_dependency_chains",
+        Mock(side_effect=RuntimeError("projection lag")),
+    )
+    backend = FakeNeo4jBackend()
+    backend.add_entity(Entity(id="org1", name="Test Org", entity_type=EntityType.ORGANIZATION))
+    store = OntologyStore(backend)
+    llm = Mock()
+    llm.invoke.side_effect = [
+        Mock(content='{"question_type":"impact","mentions":[{"mention_id":"m1",'
+                     '"text":"Test Org","expected_types":["organization"]}],'
+                     '"answer_goal":"find evidence"}'),
+        Mock(content='{"action":"finish","reason":"enough","summary":"done"}'),
+    ]
+    result = build_graph_search_workflow(store, llm, load_ontology_schema()).invoke(
+        {"query": "What affects Test Org?"}
+    )["result"]
+    assert result["traversal_stats"]["analysis_errors"]
+    assert any("projection lag" in item for item in result["key_findings"])

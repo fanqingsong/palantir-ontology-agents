@@ -193,6 +193,13 @@ class BriefingDrafterAgent:
                 lines.append(f"    - {hub['name']} ({hub['type']}): {hub['degree']} connections")
             lines.append("")
 
+        errors = (graph.traversal_stats or {}).get("analysis_errors") or []
+        if errors:
+            lines.append("  Incomplete graph steps:")
+            for item in errors[:5]:
+                lines.append(f"    - {item}")
+            lines.append("")
+
         if graph.dependency_chains:
             lines.append(f"  Supply Chain Dependencies: {len(graph.dependency_chains)} chains identified")
             for chain in graph.dependency_chains[:3]:

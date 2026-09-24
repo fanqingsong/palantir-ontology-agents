@@ -74,6 +74,7 @@ class TestThreatAssessorAgent:
         assert result.risk_matrix["evidence"]["basis"] == "graph_exposure"
         assert any("high graph exposure" in item for item in result.escalation_indicators)
         assert any(item.startswith("Score basis:") for item in result.key_findings)
+        assert "exposure >= 0.6" in result.threat_assessments[0]["assessment"]
 
     def test_threat_assertions_score_higher_than_comentions(self):
         agent = ThreatAssessorAgent()

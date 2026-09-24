@@ -145,7 +145,7 @@ class GraphAnalystAgent:
         """Focus on schema-valid store instances mentioned in the query."""
         query_lower = query.lower()
         focus_ids: list[str] = []
-        for pattern, entity_id, _etype in instance_gazetteer(self.store, self.schema):
+        for pattern, entity_id, _etype in instance_gazetteer(self.store, self.schema, query):
             if pattern in query_lower and entity_id not in focus_ids:
                 focus_ids.append(entity_id)
         if focus_ids:

@@ -24,6 +24,7 @@ from src.ontology.graph_ops import (
     traverse,
 )
 from src.ontology.schema import Entity, EntityType, Relationship, RelationshipType
+from src.entity_linking.embeddings import cosine_similarity
 from src.entity_linking.normalizer import normalize_surface
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[2] / "migrations"
@@ -555,6 +556,43 @@ class PostgresBackend:
         if row and self.record_outbox:
             self._insert_outbox("upsert_entity", record_to_entity(row).to_dict())
         self._conn.commit()
+
+    def search_by_embedding(
+        self,
+        embedding: list[float],
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+        model: str = "",
+    ) -> list[dict[str, Any]]:
+        """Cosine-rank stored embeddings when Neo4j vector search is unavailable."""
+        import os
+
+        model_name = model or os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small")
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT e.*, emb.embedding AS stored_embedding
+                FROM entity_embeddings emb
+                JOIN entities e ON e.id = emb.entity_id
+                WHERE emb.model = %s
+                  AND (%s::text[] IS NULL OR e.entity_type = ANY(%s::text[]))
+                LIMIT 5000
+                """,
+                (model_name, entity_types, entity_types),
+            )
+            rows = cur.fetchall()
+        scored = []
+        for row in rows:
+            vector = row.pop("stored_embedding") or []
+            score = cosine_similarity(embedding, list(vector))
+            if score <= 0:
+                continue
+            scored.append({
+                "entity": record_to_entity(row),
+                "vector_score": score,
+            })
+        scored.sort(key=lambda item: item["vector_score"], reverse=True)
+        return scored[:limit]
 
     def get_neighbors(
         self,

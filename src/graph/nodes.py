@@ -125,6 +125,9 @@ def graph_analyst_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     )
     if store.graph_projection_degraded():
         detail += "; Neo4j projection unavailable, traversed Postgres"
+    analysis_errors = result.traversal_stats.get("analysis_errors") or []
+    if analysis_errors:
+        detail += f"; {len(analysis_errors)} analysis step(s) failed"
     timeline.append(_timeline_entry("graph_analyst", "completed", detail))
 
     return {

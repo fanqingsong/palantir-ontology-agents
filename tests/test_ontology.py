@@ -93,6 +93,15 @@ class TestOntologyStore:
         assert any(item.id == "org1" for item in minimal_store.search("acme foundry"))
         assert any(item.id == "org1" for item in minimal_store.search("acme canonical"))
 
+    def test_search_by_embedding_ranks_closer_vector(self, minimal_store):
+        org = minimal_store.get_entity("org1")
+        loc = minimal_store.get_entity("loc1")
+        org.embedding = [1.0, 0.0]
+        loc.embedding = [0.0, 1.0]
+        matches = minimal_store.search_by_embedding([0.9, 0.1], limit=2)
+        assert matches[0]["entity"].id == "org1"
+        assert matches[0]["vector_score"] > matches[1]["vector_score"]
+
     def test_degree_counts_each_endpoint_once(self, minimal_store):
         from src.ontology.graph_ops import degree_by_entity
 

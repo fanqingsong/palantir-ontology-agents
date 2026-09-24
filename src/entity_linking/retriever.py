@@ -109,6 +109,16 @@ class HybridCandidateRetriever:
                 self._merge(by_id, item)
         except Exception as exc:
             degraded.append(f"neo4j candidate retrieval unavailable: {exc}")
+            if query_embedding:
+                try:
+                    for item in self.store.search_by_embedding(
+                        query_embedding, mention.expected_types or None, self.limit
+                    ):
+                        self._merge(by_id, item)
+                except Exception as embedding_exc:
+                    degraded.append(
+                        f"stored embedding retrieval unavailable: {embedding_exc}"
+                    )
 
         # ── 3. 收尾：给已有候选补 fuzzy / type（不再召回新实体）──
         #

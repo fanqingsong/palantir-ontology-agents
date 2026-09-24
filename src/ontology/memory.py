@@ -20,6 +20,7 @@ from src.ontology.schema import (
     RelationshipType,
     entity_from_dict,
 )
+from src.entity_linking.embeddings import cosine_similarity
 from src.entity_linking.normalizer import normalize_surface
 
 
@@ -158,6 +159,26 @@ class MemoryBackend:
             key=lambda item: (item["exact_score"], item["fuzzy_score"]), reverse=True
         )
         return candidates[:limit]
+
+    def search_by_embedding(
+        self,
+        embedding: list[float],
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        scored = []
+        for entity in self._entities.values():
+            if entity_types and entity.entity_type.value not in entity_types:
+                continue
+            score = cosine_similarity(embedding, entity.embedding)
+            if score <= 0:
+                continue
+            scored.append({
+                "entity": entity,
+                "vector_score": score,
+            })
+        scored.sort(key=lambda item: item["vector_score"], reverse=True)
+        return scored[:limit]
 
     def record_mention(self, payload: dict[str, Any]) -> int:
         mention_id = len(self._mentions) + 1

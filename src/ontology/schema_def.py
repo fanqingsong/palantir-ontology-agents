@@ -105,10 +105,45 @@ class OntologySchema:
         )
 
 
-def instance_gazetteer(store: Any, schema: OntologySchema) -> list[tuple[str, str, str]]:
-    """(pattern, entity_id, entity_type) from schema-valid store instances."""
+_gazetteer_cache: dict[tuple[Any, ...], list[tuple[str, str, str]]] = {}
+
+
+def instance_gazetteer(
+    store: Any,
+    schema: OntologySchema,
+    text: str | None = None,
+) -> list[tuple[str, str, str]]:
+    """(pattern, entity_id, entity_type) from schema-valid store instances.
+
+    The full list is cached until the store's entity or relationship count
+    changes. Pass text to keep only patterns that occur in that text.
+    """
     if store is None:
         return []
+    entries = _cached_gazetteer(store, schema)
+    if not text:
+        return list(entries)
+    lowered = text.lower()
+    return [item for item in entries if item[0] in lowered]
+
+
+def _cached_gazetteer(store: Any, schema: OntologySchema) -> list[tuple[str, str, str]]:
+    key = (
+        id(store),
+        getattr(store, "entity_count", None),
+        getattr(store, "relationship_count", None),
+        id(schema),
+    )
+    cached = _gazetteer_cache.get(key)
+    if cached is not None:
+        return cached
+    entries = _build_gazetteer(store, schema)
+    _gazetteer_cache.clear()
+    _gazetteer_cache[key] = entries
+    return entries
+
+
+def _build_gazetteer(store: Any, schema: OntologySchema) -> list[tuple[str, str, str]]:
     entries: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str]] = set()
     for entity in store.all_entities():

@@ -135,6 +135,14 @@ class DualBackend:
     def add_assertion(self, payload: dict[str, Any]) -> int:
         return self.postgres.add_assertion(payload)
 
+    def search_by_embedding(
+        self,
+        embedding: list[float],
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        return self.postgres.search_by_embedding(embedding, entity_types, limit)
+
     def save_embedding(
         self, entity_id: str, model: str, embedding: list[float], content_hash: str
     ) -> None:

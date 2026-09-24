@@ -39,6 +39,24 @@ def test_rejects_unknown_relationship_type():
         )
 
 
+def test_rejects_keywords_hidden_by_comments_or_dollar_quotes():
+    with pytest.raises(CypherValidationError):
+        validate_readonly_cypher("CR/**/EATE (n) RETURN n LIMIT 1")
+    with pytest.raises(CypherValidationError):
+        validate_readonly_cypher(
+            "MATCH (n) CA/**/LL db.labels() YIELD label RETURN label LIMIT 1"
+        )
+    with pytest.raises(CypherValidationError):
+        validate_readonly_cypher("MATCH (n) WHERE n.name = $$secret$$ RETURN n LIMIT 1")
+
+
+def test_allows_comments_in_a_read_query():
+    validate_readonly_cypher(
+        "MATCH (n:Entity) /* focus */ WHERE n.id = $id RETURN n LIMIT 5",
+        {"id": "tsmc"},
+    )
+
+
 def test_keywords_inside_strings_are_not_treated_as_clauses():
     validate_readonly_cypher(
         "MATCH (n:Entity) WHERE n.name = $name RETURN n LIMIT 1",

@@ -132,16 +132,17 @@ class OSINTAgent:
             queries.append("us military western pacific deployment")
         return queries[:3]
 
-    def _gazetteer(self) -> list[tuple[str, str, str]]:
+    def _gazetteer(self, text: str = "") -> list[tuple[str, str, str]]:
         """(pattern, entity_id, entity_type) from schema-valid store instances."""
         from src.ontology.schema_def import instance_gazetteer
 
-        return instance_gazetteer(self.store, self.schema)
+        return instance_gazetteer(self.store, self.schema, text or None)
 
     def _extract_entities(self, results: list[SearchResult]) -> list[dict[str, Any]]:
         """Match search text against ontology instances whose types are in the schema."""
         found_entities: dict[str, dict[str, Any]] = {}
-        gazetteer = self._gazetteer()
+        blob = "\n".join(f"{sr.title} {sr.content}" for sr in results)
+        gazetteer = self._gazetteer(blob)
         for sr in results:
             text = (sr.title + " " + sr.content).lower()
             matched_in_result: set[str] = set()
@@ -333,7 +334,7 @@ class OSINTAgent:
                 if entity["id"] == candidate or entity["name"].lower() == lower:
                     return entity["id"]
             if self.store:
-                for pattern, eid, _etype in self._gazetteer():
+                for pattern, eid, _etype in self._gazetteer(lower):
                     if pattern == lower:
                         return eid
         return None

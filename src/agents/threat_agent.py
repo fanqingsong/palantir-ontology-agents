@@ -314,7 +314,25 @@ class ThreatAssessorAgent:
                 "incidents significantly raises risk of accidental escalation."
             ),
         }
-        return assessments.get(ti.category, f"Assessment pending for {ti.category} threat category.")
+        text = assessments.get(ti.category, f"Assessment pending for {ti.category} threat category.")
+        evidence_bits = []
+        if graph_result and graph_result.exposure_scores:
+            high = sum(
+                1 for item in graph_result.exposure_scores
+                if isinstance(item, dict) and _unit_interval(item.get("exposure_score")) >= 0.6
+            )
+            evidence_bits.append(
+                f"this run scores {high} of {len(graph_result.exposure_scores)} entities at exposure >= 0.6"
+            )
+        assertions = [
+            item for item in (osint_result.new_relationships if osint_result else [])
+            if isinstance(item, dict)
+        ]
+        if assertions:
+            evidence_bits.append(f"OSINT recorded {len(assertions)} assertions")
+        if evidence_bits:
+            text += " Run evidence: " + "; ".join(evidence_bits) + "."
+        return text
 
     def _identify_escalation_indicators(self, threat_intel: list[ThreatIntelligence],
                                          osint_result: Optional[OSINTResult],

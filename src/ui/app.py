@@ -39,6 +39,8 @@ def render_header():
     st.markdown("---")
 
 
+_GRAPH_NODE_CAP = 200
+
 GRAPH_COLORS = {
     "organization": "#90EE90",
     "person": "#87CEEB",
@@ -47,6 +49,44 @@ GRAPH_COLORS = {
     "asset": "#DDA0DD",
     "threat": "#FF6347",
 }
+
+
+def _visible_graph(store, graph_results: dict | None):
+    """Return entities, relationships, and a note when the view is capped."""
+    entities = store.all_entities()
+    relationships = store.all_relationships()
+    if len(entities) <= _GRAPH_NODE_CAP:
+        return entities, relationships, ""
+    keep = {
+        item.get("entity_id")
+        for item in (graph_results or {}).get("exposure_scores", [])
+        if item.get("entity_id")
+    }
+    keep.update(
+        item.get("id")
+        for item in (graph_results or {}).get("hub_entities", [])
+        if item.get("id")
+    )
+    keep.update(entity.id for entity in entities if entity.source == "osint_agent")
+    neighbors: set[str] = set()
+    for rel in relationships:
+        if rel.source_id in keep or rel.target_id in keep:
+            neighbors.add(rel.source_id)
+            neighbors.add(rel.target_id)
+        if len(keep | neighbors) >= _GRAPH_NODE_CAP:
+            break
+    keep.update(neighbors)
+    if not keep:
+        keep = {entity.id for entity in entities[:_GRAPH_NODE_CAP]}
+    if len(keep) > _GRAPH_NODE_CAP:
+        keep = set(list(keep)[:_GRAPH_NODE_CAP])
+    shown = [entity for entity in entities if entity.id in keep]
+    edges = [
+        rel for rel in relationships
+        if rel.source_id in keep and rel.target_id in keep
+    ]
+    note = f"Showing {len(shown)} of {len(entities)} entities."
+    return shown, edges, note
 
 
 def render_ontology_graph(graph_results: dict | None = None):
@@ -58,15 +98,18 @@ def render_ontology_graph(graph_results: dict | None = None):
         if e.get("exposure_score", 0) >= 0.6
     }
     hubs = {h.get("id") for h in (graph_results or {}).get("hub_entities", [])}
+    entities, relationships, note = _visible_graph(store, graph_results)
+    if note:
+        st.caption(note)
 
     try:
         from streamlit_agraph import Config, Edge, Node, agraph
     except ImportError:
-        _render_graphviz_fallback(store)
+        _render_graphviz_fallback(entities, relationships)
         return
 
     nodes = []
-    for entity in store.all_entities():
+    for entity in entities:
         color = GRAPH_COLORS.get(entity.entity_type.value, "#FFFFFF")
         if entity.source == "osint_agent":
             color = "#FF8C00"
@@ -84,7 +127,7 @@ def render_ontology_graph(graph_results: dict | None = None):
             target=rel.target_id,
             label=rel.relationship_type.value.replace("_", " "),
         )
-        for rel in store.all_relationships()
+        for rel in relationships
     ]
     config = Config(
         width=1100,
@@ -97,18 +140,18 @@ def render_ontology_graph(graph_results: dict | None = None):
     agraph(nodes=nodes, edges=edges, config=config)
 
 
-def _render_graphviz_fallback(store) -> None:
+def _render_graphviz_fallback(entities, relationships) -> None:
     dot_lines = [
         "digraph ontology {",
         "  rankdir=LR;",
         "  node [shape=box, style=filled, fontsize=10];",
         "  edge [fontsize=8];",
     ]
-    for entity in store.all_entities():
+    for entity in entities:
         color = GRAPH_COLORS.get(entity.entity_type.value, "#FFFFFF")
         label = entity.name.replace('"', '\\"')[:25]
         dot_lines.append(f'  "{entity.id}" [label="{label}", fillcolor="{color}"];')
-    for rel in store.all_relationships():
+    for rel in relationships:
         label = rel.relationship_type.value.replace("_", " ")
         dot_lines.append(f'  "{rel.source_id}" -> "{rel.target_id}" [label="{label}"];')
     dot_lines.append("}")

@@ -106,6 +106,17 @@ class OntologyStore:
         method = getattr(self._backend, "add_assertion", None)
         return int(method(payload)) if callable(method) else None
 
+    def search_by_embedding(
+        self,
+        embedding: list[float],
+        entity_types: Optional[list[str]] = None,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        method = getattr(self._backend, "search_by_embedding", None)
+        if callable(method):
+            return list(method(embedding, entity_types, limit))
+        return []
+
     def save_embedding(
         self, entity_id: str, model: str, embedding: list[float], content_hash: str
     ) -> None:

@@ -148,6 +148,7 @@ def build_graph_search_workflow(
         entity_context = [
             inspect_entity(store, entity_id) for entity_id in linked_ids[:8]
         ]
+        analysis_errors: list[str] = []
         dependency_chains = []
         for entity_id in linked_ids[:8]:
             try:
@@ -157,16 +158,18 @@ def build_graph_search_workflow(
                     max_depth=5,
                     rel_types=schema.dependency_rel_enums(),
                 ))
-            except Exception:
-                pass
+            except Exception as exc:
+                analysis_errors.append(f"dependency chains for {entity_id}: {exc}")
         try:
             exposure_scores = get_exposure_report(store, entity_ids=linked_ids)
-        except Exception:
+        except Exception as exc:
             exposure_scores = []
+            analysis_errors.append(f"exposure report: {exc}")
         try:
             degrees = degree_by_entity(store)
-        except Exception:
+        except Exception as exc:
             degrees = {}
+            analysis_errors.append(f"degree counts: {exc}")
         hubs = []
         for entity_id in linked_ids:
             entity = store.get_entity(entity_id)
@@ -183,6 +186,7 @@ def build_graph_search_workflow(
         observations = state.get("observations", [])
         summary = str(state.get("decision", {}).get("summary") or "")
         findings = [summary] if summary else []
+        findings.extend(f"Graph analysis incomplete: {item}" for item in analysis_errors)
         findings.extend(
             f"Round {item['round']} returned {item.get('row_count', 0)} rows for "
             f"{item.get('goal') or 'graph evidence search'}."
@@ -203,6 +207,7 @@ def build_graph_search_workflow(
                 "focus_entities": len(linked_ids),
                 "agent_rounds": state.get("round", 0),
                 "rows_observed": sum(item.get("row_count", 0) for item in observations),
+                "analysis_errors": analysis_errors,
             },
             "key_findings": findings[:8] or ["No graph evidence was found."],
             "timestamp": datetime.now(timezone.utc).isoformat(),
