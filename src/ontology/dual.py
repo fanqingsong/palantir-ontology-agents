@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Optional
 
@@ -9,6 +10,8 @@ from src.ontology.neo4j_backend import Neo4jBackend
 from src.ontology.outbox_projector import OutboxProjector
 from src.ontology.postgres_backend import PostgresBackend
 from src.ontology.schema import Entity, EntityType, Relationship, RelationshipType
+
+logger = logging.getLogger(__name__)
 
 
 def _sync_flush_on_write() -> bool:
@@ -27,12 +30,14 @@ class DualBackend:
         self._projector = OutboxProjector(postgres, neo4j)
         # Graph reads reuse the last successful drain until the next Postgres write.
         self._projection_ready = False
+        self.projection_degraded = False
         self._read_backend: PostgresBackend | Neo4jBackend = neo4j
 
     def flush_outbox(self) -> int:
         processed = self._projector.drain_pending(worker_id="dual-backend")
         self._read_backend = self.neo4j
         self._projection_ready = True
+        self.projection_degraded = False
         return processed
 
     def _maybe_flush(self) -> None:
@@ -50,8 +55,13 @@ class DualBackend:
         try:
             self.flush_outbox()
         except Exception:
+            logger.warning(
+                "Neo4j projection drain failed; graph reads are using Postgres",
+                exc_info=True,
+            )
             self._read_backend = self.postgres
             self._projection_ready = True
+            self.projection_degraded = True
         return self._read_backend
 
     def add_entity(self, entity: Entity) -> str:

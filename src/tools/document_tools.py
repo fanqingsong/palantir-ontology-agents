@@ -11,7 +11,7 @@ In production, this would integrate with:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 
@@ -107,8 +107,9 @@ def generate_briefing_document(
     if distribution is None:
         distribution = "SECDEF, NSC, INDOPACOM, USTR"
 
+    now = datetime.now(timezone.utc)
     return BRIEFING_TEMPLATE.format(
-        date=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        date=now.strftime("%Y-%m-%d %H:%M UTC"),
         subject=subject,
         classification=classification,
         source_count="Multiple",
@@ -121,7 +122,7 @@ def generate_briefing_document(
         recommendations=recommendations,
         outlook=outlook,
         distribution=distribution,
-        next_update=(datetime.utcnow().strftime("%Y-%m-%d") + " + 24h"),
+        next_update=(now.strftime("%Y-%m-%d") + " + 24h"),
     )
 
 

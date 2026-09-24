@@ -6,9 +6,12 @@ Falls back to pre-loaded demo results when no API key is available.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -122,8 +125,8 @@ def _live_search(query: str, max_results: int, api_key: str) -> list[SearchResul
                 published_date=item.get("published_date", ""),
             ))
         return results
-    except Exception as e:
-        print(f"Tavily search failed, falling back to demo mode: {e}")
+    except Exception:
+        logger.warning("Tavily search failed, falling back to demo mode", exc_info=True)
         return _demo_search(query, max_results)
 
 

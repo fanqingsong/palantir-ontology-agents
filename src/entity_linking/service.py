@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import uuid
 from typing import Any
@@ -20,6 +21,8 @@ from src.entity_linking.retriever import HybridCandidateRetriever
 from src.ontology.schema import Entity, EntityType
 from src.ontology.schema_def import load_ontology_schema
 from src.ontology.store import OntologyStore
+
+logger = logging.getLogger(__name__)
 
 
 class EntityLinkingService:
@@ -71,7 +74,7 @@ class EntityLinkingService:
     def persist_decision(self, decision: LinkDecision, run_id: str = "") -> None:
         self._persist(decision, run_id)
 
-    def create_canonical_entity(self, decision: LinkDecision) -> Entity:
+    def create_canonical_entity(self, decision: LinkDecision, *, embed: bool = True) -> Entity:
         if decision.status != LinkStatus.NEW:
             raise ValueError("Only NEW decisions may create canonical entities")
         mention = decision.mention
@@ -93,27 +96,41 @@ class EntityLinkingService:
         )
         self.store.add_entity(entity)
         decision.entity_id = entity.id
-        self.refresh_embedding(entity.id)
+        if embed:
+            self.refresh_embedding(entity.id)
         return entity
 
     def refresh_embedding(self, entity_id: str) -> bool:
+        return self.refresh_embeddings([entity_id]) == 1
+
+    def refresh_embeddings(self, entity_ids: list[str]) -> int:
         if not self.embeddings.available:
-            return False
-        entity = self.store.get_entity(entity_id)
-        if not entity:
-            return False
-        text = entity_embedding_text(entity)
+            return 0
+        entities = []
+        texts = []
+        for entity_id in dict.fromkeys(entity_ids):
+            entity = self.store.get_entity(entity_id)
+            if not entity:
+                continue
+            entities.append(entity)
+            texts.append(entity_embedding_text(entity))
+        if not texts:
+            return 0
         try:
-            vector = self.embeddings.embed_query(text)
+            vectors = self.embeddings.embed_documents(texts)
         except Exception:
-            return False
-        if not vector:
-            return False
-        entity.embedding = vector
-        self.store.save_embedding(
-            entity.id, self.embeddings.model, vector, content_hash(text)
-        )
-        return True
+            logger.warning("Embedding refresh failed for %s entities", len(texts), exc_info=True)
+            return 0
+        saved = 0
+        for entity, text, vector in zip(entities, texts, vectors):
+            if not vector:
+                continue
+            entity.embedding = vector
+            self.store.save_embedding(
+                entity.id, self.embeddings.model, vector, content_hash(text)
+            )
+            saved += 1
+        return saved
 
     def _decide(
         self,

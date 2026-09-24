@@ -86,6 +86,22 @@ class TestOntologyStore:
         results = minimal_store.search("Test")
         assert len(results) == 3  # All entities have "Test" in name
 
+    def test_search_matches_alias_and_canonical_name(self, minimal_store):
+        minimal_store.add_alias("org1", "Acme Foundry")
+        entity = minimal_store.get_entity("org1")
+        entity.canonical_name = "Acme Canonical"
+        assert any(item.id == "org1" for item in minimal_store.search("acme foundry"))
+        assert any(item.id == "org1" for item in minimal_store.search("acme canonical"))
+
+    def test_degree_counts_each_endpoint_once(self, minimal_store):
+        from src.ontology.graph_ops import degree_by_entity
+
+        counts = degree_by_entity(minimal_store)
+        assert counts["org1"] == len(minimal_store.get_neighbors("org1"))
+        assert counts["loc1"] == len(minimal_store.get_neighbors("loc1"))
+        assert counts["threat1"] == len(minimal_store.get_neighbors("threat1"))
+        assert counts["loc1"] == 2
+
     def test_get_entity_by_name(self, minimal_store):
         entity = minimal_store.get_entity_by_name("Test Org")
         assert entity is not None

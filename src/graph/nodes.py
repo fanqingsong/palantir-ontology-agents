@@ -6,7 +6,7 @@ and returns state updates.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from typing import Any
 
@@ -33,7 +33,7 @@ def _timeline_entry(agent: str, status: str, detail: str = "") -> dict[str, Any]
         "agent": agent,
         "status": status,
         "detail": detail,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -119,10 +119,13 @@ def graph_analyst_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     agent = GraphAnalystAgent(ontology_store=store, llm=llm)
     result = agent.run(query)
 
-    timeline.append(_timeline_entry(
-        "graph_analyst", "completed",
-        f"Analyzed {len(result.exposure_scores)} entities, found {len(result.dependency_chains)} dependency chains"
-    ))
+    detail = (
+        f"Analyzed {len(result.exposure_scores)} entities, "
+        f"found {len(result.dependency_chains)} dependency chains"
+    )
+    if store.graph_projection_degraded():
+        detail += "; Neo4j projection unavailable, traversed Postgres"
+    timeline.append(_timeline_entry("graph_analyst", "completed", detail))
 
     return {
         "graph_results": result.to_dict(),

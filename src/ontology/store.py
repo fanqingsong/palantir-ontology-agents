@@ -168,6 +168,9 @@ class OntologyStore:
             return int(flush() or 0)
         return 0
 
+    def graph_projection_degraded(self) -> bool:
+        return bool(getattr(self._backend, "projection_degraded", False))
+
     @property
     def entity_count(self) -> int:
         return self._backend.entity_count

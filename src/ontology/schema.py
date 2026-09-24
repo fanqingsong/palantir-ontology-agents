@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class EntityType(str, Enum):
@@ -55,7 +59,7 @@ class Entity:
     description: str = ""
     attributes: dict[str, Any] = field(default_factory=dict)
     tags: list[str] = field(default_factory=list)
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=_utc_now_iso)
     source: str = "manual"
     confidence: float = 1.0
 
@@ -152,7 +156,7 @@ class Relationship:
     source_label: str = ""  # populated at query time
     target_label: str = ""  # populated at query time
     bidirectional: bool = False
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=_utc_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)

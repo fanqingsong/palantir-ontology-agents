@@ -124,6 +124,16 @@ def calculate_exposure_score(
     return round(max_score, 2)
 
 
+def degree_by_entity(view: GraphView) -> dict[str, int]:
+    """Count each relationship once at every distinct endpoint."""
+    counts: dict[str, int] = {}
+    for relationship in view.all_relationships():
+        for endpoint in {relationship.source_id, relationship.target_id}:
+            if endpoint:
+                counts[endpoint] = counts.get(endpoint, 0) + 1
+    return counts
+
+
 def store_to_dict(view: GraphView) -> dict[str, Any]:
     entities = view.all_entities()
     relationships = view.all_relationships()

@@ -253,7 +253,22 @@ def render_linking_review_queue():
     with st.sidebar.expander(f"Entity Linking Reviews ({len(reviews)})", expanded=False):
         if not reviews:
             st.caption("No pending reviews.")
-        for review in reviews[:20]:
+            return
+        page_size = 10
+        pages = max(1, (len(reviews) + page_size - 1) // page_size)
+        page = 1
+        if pages > 1:
+            page = int(st.number_input(
+                "Review page",
+                min_value=1,
+                max_value=pages,
+                value=1,
+                step=1,
+            ))
+        start = (page - 1) * page_size
+        window = reviews[start:start + page_size]
+        st.caption(f"{start + 1}–{start + len(window)} of {len(reviews)} pending")
+        for review in window:
             st.markdown(f"**{review.get('surface_form', 'Unknown mention')}**")
             candidates = review.get("candidates") or []
             options = {

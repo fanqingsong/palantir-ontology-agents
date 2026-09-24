@@ -94,7 +94,14 @@ class MemoryBackend:
         query_lower = query.lower()
         results = []
         for entity in self._entities.values():
-            if query_lower in entity.name.lower() or query_lower in entity.description.lower():
+            haystacks = [
+                entity.name,
+                entity.canonical_name,
+                entity.description,
+                *entity.aliases,
+                *self._aliases.get(entity.id, []),
+            ]
+            if any(query_lower in (value or "").lower() for value in haystacks):
                 results.append(entity)
         return results
 

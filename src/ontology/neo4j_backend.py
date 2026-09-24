@@ -7,6 +7,7 @@ import os
 import hashlib
 import time
 import re
+from enum import Enum
 from typing import Any, Optional
 
 from src.ontology.codec import entity_to_record, record_to_entity, record_to_relationship
@@ -229,13 +230,18 @@ class Neo4jBackend:
             return [self._node_to_entity(rec["n"]) for rec in result]
 
     def query_by_attribute(self, key: str, value: Any) -> list[Entity]:
-        matches = []
-        for entity in self.all_entities():
-            if entity.attributes.get(key) == value:
-                matches.append(entity)
-            elif hasattr(entity, key) and getattr(entity, key) == value:
-                matches.append(entity)
-        return matches
+        stored = value.value if isinstance(value, Enum) else value
+        with self._driver.session() as session:
+            result = session.run(
+                """
+                MATCH (n:Entity)
+                WHERE n[$key] = $value
+                RETURN n
+                """,
+                key=key,
+                value=stored,
+            )
+            return [self._node_to_entity(rec["n"]) for rec in result]
 
     def search(self, query: str) -> list[Entity]:
         q = query.lower()
@@ -243,7 +249,10 @@ class Neo4jBackend:
             result = session.run(
                 """
                 MATCH (n:Entity)
-                WHERE toLower(n.name) CONTAINS $q OR toLower(n.description) CONTAINS $q
+                WHERE toLower(n.name) CONTAINS $q
+                   OR toLower(coalesce(n.description, '')) CONTAINS $q
+                   OR toLower(coalesce(n.canonical_name, '')) CONTAINS $q
+                   OR any(alias IN coalesce(n.aliases, []) WHERE toLower(alias) CONTAINS $q)
                 RETURN n
                 """,
                 q=q,

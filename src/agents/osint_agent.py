@@ -10,7 +10,7 @@ import json
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from src.ontology.schema import Relationship, RelationshipType, entity_from_dict
@@ -35,7 +35,7 @@ class OSINTResult:
     new_relationships: list[dict[str, Any]] = field(default_factory=list)
     key_findings: list[str] = field(default_factory=list)
     sources_consulted: int = 0
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -190,9 +190,12 @@ class OSINTAgent:
         if not linker:
             return [], []
         decisions = linker.link(mentions, mode="write", persist=False)
+        embed_ids: list[str] = []
         for decision in decisions:
             if decision.status == LinkStatus.NEW:
-                linker.create_canonical_entity(decision)
+                linker.create_canonical_entity(decision, embed=False)
+                if decision.entity_id:
+                    embed_ids.append(decision.entity_id)
             linker.persist_decision(decision, self.run_id)
         decision_by_mention = {d.mention.mention_id: d for d in decisions}
 
@@ -210,7 +213,7 @@ class OSINTAgent:
                     source="osint_agent",
                     confidence=decision.confidence,
                 )
-                linker.refresh_embedding(entity.id)
+                embed_ids.append(entity.id)
             entities.append({
                 "id": entity.id,
                 "name": entity.name,
@@ -221,6 +224,8 @@ class OSINTAgent:
                 "attributes": dict(decision.mention.attributes),
                 "link_status": decision.status.value,
             })
+        if embed_ids:
+            linker.refresh_embeddings(embed_ids)
 
         relationships: list[dict[str, Any]] = []
         for assertion in assertions:
@@ -257,16 +262,6 @@ class OSINTAgent:
                     "confidence": assertion.confidence,
                 })
         return entities, relationships
-
-    def _entity_catalog(self) -> str:
-        if not self.store:
-            return ""
-        lines = []
-        for entity in self.store.all_entities():
-            etype = entity.entity_type.value
-            if self.schema.is_entity_type(etype):
-                lines.append(f"- {entity.id} ({etype}): {entity.name}")
-        return "\n".join(lines[:80])
 
     def _normalize_extracted_entity(self, item: dict[str, Any]) -> Optional[dict[str, Any]]:
         if not isinstance(item, dict):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
 
@@ -225,37 +226,56 @@ class PostgresBackend:
         return [record_to_entity(row) for row in rows]
 
     def query_by_attribute(self, key: str, value: Any) -> list[Entity]:
+        stored = value.value if isinstance(value, Enum) else value
+        clauses = [
+            "attributes @> %s::jsonb",
+            "attributes ->> %s = %s",
+        ]
+        params: list[Any] = [Jsonb({key: stored}), key, str(stored)]
+        columns = {
+            "id": "id",
+            "name": "name",
+            "description": "description",
+            "source": "source",
+            "entity_type": "entity_type",
+        }
+        column = columns.get(key)
+        if column:
+            clauses.append(f"{column} = %s")
+            params.append(str(stored))
+        if key == "confidence":
+            clauses.append("confidence = %s")
+            params.append(stored)
         with self._conn.cursor() as cur:
             cur.execute(
-                """
-                SELECT * FROM entities
-                WHERE attributes ->> %s = %s
-                   OR name = %s
+                f"""
+                SELECT DISTINCT ON (id) *
+                FROM entities
+                WHERE {' OR '.join(clauses)}
+                ORDER BY id
                 """,
-                (key, str(value), str(value)),
+                params,
             )
             rows = cur.fetchall()
-        # Also match typed fields stored as native JSON types
-        matches = [record_to_entity(row) for row in rows]
-        seen = {e.id for e in matches}
-        for entity in self.all_entities():
-            if entity.id in seen:
-                continue
-            if entity.attributes.get(key) == value:
-                matches.append(entity)
-            elif hasattr(entity, key) and getattr(entity, key) == value:
-                matches.append(entity)
-        return matches
+        return [record_to_entity(row) for row in rows]
 
     def search(self, query: str) -> list[Entity]:
         pattern = f"%{query}%"
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT * FROM entities
-                WHERE name ILIKE %s OR description ILIKE %s
+                SELECT e.*
+                FROM entities e
+                WHERE e.name ILIKE %s
+                   OR e.description ILIKE %s
+                   OR COALESCE(e.attributes->>'canonical_name', '') ILIKE %s
+                   OR COALESCE(e.attributes->>'aliases', '') ILIKE %s
+                   OR EXISTS (
+                        SELECT 1 FROM entity_aliases a
+                        WHERE a.entity_id = e.id AND a.alias ILIKE %s
+                   )
                 """,
-                (pattern, pattern),
+                (pattern, pattern, pattern, pattern, pattern),
             )
             rows = cur.fetchall()
         return [record_to_entity(row) for row in rows]

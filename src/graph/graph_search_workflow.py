@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -13,6 +13,7 @@ from src.agents.llm_support import invoke_llm
 from src.entity_linking.models import Mention
 from src.entity_linking.normalizer import normalize_surface
 from src.entity_linking.service import EntityLinkingService
+from src.ontology.graph_ops import degree_by_entity
 from src.ontology.schema_def import OntologySchema
 from src.ontology.store import OntologyStore
 from src.tools.graph_search_tools import (
@@ -162,20 +163,20 @@ def build_graph_search_workflow(
             exposure_scores = get_exposure_report(store, entity_ids=linked_ids)
         except Exception:
             exposure_scores = []
+        try:
+            degrees = degree_by_entity(store)
+        except Exception:
+            degrees = {}
         hubs = []
         for entity_id in linked_ids:
             entity = store.get_entity(entity_id)
             if not entity:
                 continue
-            try:
-                degree = len(store.get_neighbors(entity_id))
-            except Exception:
-                degree = 0
             hubs.append({
                 "id": entity.id,
                 "name": entity.name,
                 "type": entity.entity_type.value,
-                "degree": degree,
+                "degree": degrees.get(entity_id, 0),
                 "description": entity.description[:100],
             })
         hubs.sort(key=lambda item: item["degree"], reverse=True)
@@ -204,7 +205,7 @@ def build_graph_search_workflow(
                 "rows_observed": sum(item.get("row_count", 0) for item in observations),
             },
             "key_findings": findings[:8] or ["No graph evidence was found."],
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "linked_entities": state.get("linked_entities", []),
             "unresolved_entities": state.get("unresolved_entities", []),
             "search_trace": observations,

@@ -7,10 +7,11 @@ identify critical paths, and analyze supply chain relationships.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 from typing import Any, Optional
 
+from src.ontology.graph_ops import degree_by_entity
 from src.ontology.schema_def import OntologySchema, instance_gazetteer, load_ontology_schema
 from src.ontology.store import OntologyStore
 from src.tools.ontology_tools import (
@@ -37,7 +38,7 @@ class GraphAnalysisResult:
     evidence: list[dict[str, Any]] = field(default_factory=list)
     stop_reason: str = ""
     schema_version: str = "legacy-v1"
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -149,16 +150,17 @@ class GraphAnalystAgent:
                 focus_ids.append(entity_id)
         if focus_ids:
             return focus_ids[:8]
-        return self._default_focus_ids()
+        return [entity.id for _degree, entity in self._entities_by_degree()[:3]]
 
-    def _default_focus_ids(self, limit: int = 3) -> list[str]:
-        ranked: list[tuple[int, str]] = []
-        for entity in self.store.all_entities():
-            if not self.schema.is_entity_type(entity.entity_type.value):
-                continue
-            ranked.append((len(self.store.get_neighbors(entity.id)), entity.id))
-        ranked.sort(reverse=True)
-        return [entity_id for _degree, entity_id in ranked[:limit]]
+    def _entities_by_degree(self) -> list[tuple[int, Any]]:
+        counts = degree_by_entity(self.store)
+        ranked = [
+            (counts.get(entity.id, 0), entity)
+            for entity in self.store.all_entities()
+            if self.schema.is_entity_type(entity.entity_type.value)
+        ]
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked
 
     def _find_critical_paths(self, entity_ids: list[str]) -> list[dict[str, Any]]:
         """Find shortest paths between all pairs of focus entities."""
@@ -195,25 +197,15 @@ class GraphAnalystAgent:
 
     def _find_hub_entities(self, top_n: int = 10) -> list[dict[str, Any]]:
         """Find entities with highest connectivity (degree centrality)."""
-        degree_counts: dict[str, int] = {}
-        for entity in self.store.all_entities():
-            if not self.schema.is_entity_type(entity.entity_type.value):
-                continue
-            neighbors = self.store.get_neighbors(entity.id)
-            degree_counts[entity.id] = len(neighbors)
-
-        sorted_entities = sorted(degree_counts.items(), key=lambda x: x[1], reverse=True)
         hubs = []
-        for eid, degree in sorted_entities[:top_n]:
-            entity = self.store.get_entity(eid)
-            if entity:
-                hubs.append({
-                    "id": eid,
-                    "name": entity.name,
-                    "type": entity.entity_type.value,
-                    "degree": degree,
-                    "description": entity.description[:100],
-                })
+        for degree, entity in self._entities_by_degree()[:top_n]:
+            hubs.append({
+                "id": entity.id,
+                "name": entity.name,
+                "type": entity.entity_type.value,
+                "degree": degree,
+                "description": entity.description[:100],
+            })
         return hubs
 
     def _compute_traversal_stats(self, entity_ids: list[str]) -> dict[str, Any]:
