@@ -151,6 +151,19 @@ class OntologyStore:
     def find_path(self, source_id: str, target_id: str, max_hops: int = 5) -> Optional[list[str]]:
         return self._backend.find_path(source_id, target_id, max_hops=max_hops)
 
+    def find_paths_from(
+        self,
+        source_id: str,
+        target_ids: list[str],
+        max_hops: int = 5,
+    ) -> dict[str, list[str]]:
+        method = getattr(self._backend, "find_paths_from", None)
+        if callable(method):
+            return dict(method(source_id, target_ids, max_hops))
+        from src.ontology.graph_ops import shortest_paths_from
+
+        return shortest_paths_from(self._backend, source_id, target_ids, max_hops=max_hops)
+
     def get_dependency_chains(
         self,
         entity_id: str,
@@ -166,10 +179,25 @@ class OntologyStore:
     ) -> float:
         return self._backend.calculate_exposure_score(entity_id, threat_ids=threat_ids)
 
+    def exposure_scores(
+        self,
+        entity_ids: list[str],
+        threat_ids: list[str],
+    ) -> dict[str, float]:
+        method = getattr(self._backend, "exposure_scores", None)
+        if callable(method):
+            return dict(method(entity_ids, threat_ids))
+        from src.ontology.graph_ops import exposure_scores as score_many
+
+        return score_many(self._backend, entity_ids, threat_ids)
+
     def to_dict(self) -> dict[str, Any]:
         return self._backend.to_dict()
 
     def snapshot_stats(self) -> dict[str, Any]:
+        method = getattr(self._backend, "stats", None)
+        if callable(method):
+            return dict(method())
         payload = self._backend.to_dict()
         return payload.get("stats", {})
 

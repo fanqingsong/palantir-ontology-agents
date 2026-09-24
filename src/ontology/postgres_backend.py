@@ -608,20 +608,69 @@ class PostgresBackend:
         if direction in ("incoming", "both"):
             clauses.append("(target_id = %s OR (bidirectional AND source_id = %s))")
             params.extend([entity_id, entity_id])
-        sql = f"SELECT * FROM relationships WHERE ({' OR '.join(clauses)})"
+        if not clauses:
+            return []
+        sql = f"""
+            SELECT
+                r.id AS rel_id,
+                r.source_id,
+                r.target_id,
+                r.rel_type,
+                r.weight,
+                r.bidirectional,
+                r.description AS rel_description,
+                r.confidence AS rel_confidence,
+                r.attributes AS rel_attributes,
+                r.created_at AS rel_created_at,
+                e.id AS entity_id,
+                e.entity_type,
+                e.name,
+                e.description,
+                e.tags,
+                e.source,
+                e.confidence,
+                e.attributes,
+                e.created_at
+            FROM relationships r
+            JOIN entities e ON e.id = CASE
+                WHEN r.source_id = %s THEN r.target_id
+                ELSE r.source_id
+            END
+            WHERE ({' OR '.join(clauses)})
+        """
+        join_params: list[Any] = [entity_id, *params]
         if relationship_type:
-            sql += " AND rel_type = %s"
-            params.append(relationship_type.value)
+            sql += " AND r.rel_type = %s"
+            join_params.append(relationship_type.value)
         with self._conn.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(sql, join_params)
             rows = cur.fetchall()
         neighbors: list[tuple[Entity, Relationship]] = []
         for row in rows:
-            rel = record_to_relationship(row)
-            neighbor_id = rel.target_id if rel.source_id == entity_id else rel.source_id
-            neighbor = self.get_entity(neighbor_id)
-            if neighbor:
-                neighbors.append((neighbor, rel))
+            rel = record_to_relationship({
+                "id": row["rel_id"],
+                "source_id": row["source_id"],
+                "target_id": row["target_id"],
+                "rel_type": row["rel_type"],
+                "weight": row["weight"],
+                "bidirectional": row["bidirectional"],
+                "description": row["rel_description"],
+                "confidence": row["rel_confidence"],
+                "attributes": row["rel_attributes"],
+                "created_at": row["rel_created_at"],
+            })
+            neighbor = record_to_entity({
+                "id": row["entity_id"],
+                "entity_type": row["entity_type"],
+                "name": row["name"],
+                "description": row["description"],
+                "tags": row["tags"],
+                "source": row["source"],
+                "confidence": row["confidence"],
+                "attributes": row["attributes"],
+                "created_at": row["created_at"],
+            })
+            neighbors.append((neighbor, rel))
         return neighbors
 
     def traverse(
@@ -756,6 +805,21 @@ class PostgresBackend:
         except Exception:
             self._conn.rollback()
             raise
+
+    def stats(self) -> dict[str, Any]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "SELECT entity_type, COUNT(*) AS n FROM entities GROUP BY entity_type"
+            )
+            type_rows = cur.fetchall()
+            cur.execute("SELECT COUNT(*) AS n FROM relationships")
+            relationship_count = int(cur.fetchone()["n"])
+        type_distribution = {row["entity_type"]: int(row["n"]) for row in type_rows}
+        return {
+            "entity_count": sum(type_distribution.values()),
+            "relationship_count": relationship_count,
+            "type_distribution": type_distribution,
+        }
 
     @property
     def entity_count(self) -> int:

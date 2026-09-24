@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 from src.ontology.codec import entity_to_record, record_to_entity, record_to_relationship
 from src.ontology.graph_ops import (
-    calculate_exposure_score,
+    exposure_from_hops,
     get_dependency_chains,
     store_to_dict,
     traverse,
@@ -414,18 +414,34 @@ class Neo4jBackend:
         return traverse(self, entity_id, hops=hops, relationship_type=relationship_type)
 
     def find_path(self, source_id: str, target_id: str, max_hops: int = 5) -> Optional[list[str]]:
-        if source_id == target_id:
-            return [source_id]
+        return self.find_paths_from(source_id, [target_id], max_hops=max_hops).get(target_id)
+
+    def find_paths_from(
+        self,
+        source_id: str,
+        target_ids: list[str],
+        max_hops: int = 5,
+    ) -> dict[str, list[str]]:
+        """One shortest-path query from a source to many targets."""
+        found: dict[str, list[str]] = {}
+        if source_id in target_ids:
+            found[source_id] = [source_id]
+        targets = [target_id for target_id in dict.fromkeys(target_ids) if target_id != source_id]
+        if not targets:
+            return found
+        hops = max(0, int(max_hops))
         query = """
-        MATCH (a:Entity {id: $src}), (b:Entity {id: $tgt})
+        UNWIND $targets AS tgt
+        MATCH (a:Entity {id: $src}), (b:Entity {id: tgt})
         MATCH p = shortestPath((a)-[*..%d]-(b))
-        RETURN [n IN nodes(p) | n.id] AS path
-        """ % max_hops
+        RETURN tgt AS target, [n IN nodes(p) | n.id] AS path
+        """ % hops
         with self._driver.session() as session:
-            record = session.run(query, src=source_id, tgt=target_id).single()
-        if not record or not record["path"]:
-            return None
-        return list(record["path"])
+            for record in session.run(query, src=source_id, targets=targets):
+                path = list(record["path"] or [])
+                if path:
+                    found[str(record["target"])] = path
+        return found
 
     def get_dependency_chains(
         self,
@@ -435,10 +451,49 @@ class Neo4jBackend:
     ) -> list[list[str]]:
         return get_dependency_chains(self, entity_id, rel_types=rel_types, max_depth=max_depth)
 
+    def exposure_scores(
+        self,
+        entity_ids: list[str],
+        threat_ids: Optional[list[str]] = None,
+    ) -> dict[str, float]:
+        """Nearest-threat scores in one Cypher round trip.
+
+        Hops are capped at 5. A longer path scores 0, matching the in-memory
+        scorer. An entity that is itself a threat scores as zero hops.
+        """
+        unique_ids = list(dict.fromkeys(entity_ids))
+        if threat_ids is None:
+            threat_ids = [entity.id for entity in self.query_by_type(EntityType.THREAT)]
+        threat_set = set(threat_ids)
+        scores = {
+            entity_id: exposure_from_hops(0) if entity_id in threat_set else 0.0
+            for entity_id in unique_ids
+        }
+        query_ids = [entity_id for entity_id in unique_ids if entity_id not in threat_set]
+        if not query_ids or not threat_set:
+            return scores
+
+        query = """
+        UNWIND $entity_ids AS eid
+        MATCH (e:Entity {id: eid})
+        MATCH (t:Entity)
+        WHERE t.id IN $threat_ids
+        MATCH p = shortestPath((e)-[*1..5]-(t))
+        RETURN e.id AS entity_id, min(length(p)) AS hops
+        """
+        with self._driver.session() as session:
+            for record in session.run(query, entity_ids=query_ids, threat_ids=list(threat_set)):
+                hops = record["hops"]
+                if hops is not None:
+                    scores[str(record["entity_id"])] = exposure_from_hops(int(hops))
+        return scores
+
     def calculate_exposure_score(
         self, entity_id: str, threat_ids: Optional[list[str]] = None
     ) -> float:
-        return calculate_exposure_score(self, entity_id, threat_ids=threat_ids)
+        if threat_ids is None:
+            threat_ids = [entity.id for entity in self.query_by_type(EntityType.THREAT)]
+        return self.exposure_scores([entity_id], threat_ids).get(entity_id, 0.0)
 
     def to_dict(self) -> dict[str, Any]:
         return store_to_dict(self)
@@ -461,6 +516,28 @@ class Neo4jBackend:
     def project_delete_relationship(self, rel_id: str) -> None:
         with self._driver.session() as session:
             session.run("MATCH ()-[r]->() WHERE r.id = $id DELETE r", id=rel_id)
+
+    def stats(self) -> dict[str, Any]:
+        with self._driver.session() as session:
+            type_rows = session.run(
+                """
+                MATCH (n:Entity)
+                RETURN n.entity_type AS entity_type, count(n) AS n
+                """
+            )
+            type_distribution = {
+                record["entity_type"]: int(record["n"])
+                for record in type_rows
+                if record["entity_type"]
+            }
+            relationship_row = session.run(
+                "MATCH ()-[r]->() RETURN count(r) AS n"
+            ).single()
+        return {
+            "entity_count": sum(type_distribution.values()),
+            "relationship_count": int(relationship_row["n"]) if relationship_row else 0,
+            "type_distribution": type_distribution,
+        }
 
     @property
     def entity_count(self) -> int:

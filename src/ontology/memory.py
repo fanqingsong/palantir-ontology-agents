@@ -29,35 +29,62 @@ class MemoryBackend:
 
     def __init__(self) -> None:
         self._entities: dict[str, Entity] = {}
+        self._name_index: dict[str, str] = {}
         self._relationships: dict[str, Relationship] = {}
         self._outgoing: dict[str, list[str]] = defaultdict(list)
         self._incoming: dict[str, list[str]] = defaultdict(list)
         self._type_index: dict[EntityType, set[str]] = defaultdict(set)
         self._aliases: dict[str, list[str]] = defaultdict(list)
         self._mentions: list[dict[str, Any]] = []
+        self._mentions_by_id: dict[int, dict[str, Any]] = {}
         self._reviews: list[dict[str, Any]] = []
         self._assertions: list[dict[str, Any]] = []
 
     def add_entity(self, entity: Entity) -> str:
+        previous = self._entities.get(entity.id)
+        old_name = previous.name.lower() if previous else None
         self._entities[entity.id] = entity
         self._type_index[entity.entity_type].add(entity.id)
+        new_name = entity.name.lower()
+        if old_name and old_name != new_name:
+            self._reindex_name(old_name)
+        if new_name and self._name_index.get(new_name) != entity.id:
+            if new_name not in self._name_index:
+                self._name_index[new_name] = entity.id
+            else:
+                self._reindex_name(new_name)
         return entity.id
+
+    def _reindex_name(self, name_key: str) -> None:
+        """Point a name at the earliest entity, matching a full scan."""
+        if not name_key:
+            return
+        for other in self._entities.values():
+            if other.name.lower() == name_key:
+                self._name_index[name_key] = other.id
+                return
+        self._name_index.pop(name_key, None)
 
     def get_entity(self, entity_id: str) -> Optional[Entity]:
         return self._entities.get(entity_id)
 
     def get_entity_by_name(self, name: str) -> Optional[Entity]:
-        name_lower = name.lower()
-        for entity in self._entities.values():
-            if entity.name.lower() == name_lower:
-                return entity
-        return None
+        entity_id = self._name_index.get(name.lower())
+        if not entity_id:
+            return None
+        entity = self._entities.get(entity_id)
+        if entity and entity.name.lower() == name.lower():
+            return entity
+        self._reindex_name(name.lower())
+        entity_id = self._name_index.get(name.lower())
+        return self._entities.get(entity_id) if entity_id else None
 
     def remove_entity(self, entity_id: str) -> bool:
         if entity_id not in self._entities:
             return False
         entity = self._entities.pop(entity_id)
         self._type_index[entity.entity_type].discard(entity_id)
+        self._reindex_name(entity.name.lower())
         rel_ids = set(self._outgoing.pop(entity_id, []) + self._incoming.pop(entity_id, []))
         for rid in rel_ids:
             self._relationships.pop(rid, None)
@@ -182,7 +209,9 @@ class MemoryBackend:
 
     def record_mention(self, payload: dict[str, Any]) -> int:
         mention_id = len(self._mentions) + 1
-        self._mentions.append({"id": mention_id, **payload})
+        row = {"id": mention_id, **payload}
+        self._mentions.append(row)
+        self._mentions_by_id[mention_id] = row
         return mention_id
 
     def enqueue_linking_review(
@@ -202,10 +231,7 @@ class MemoryBackend:
         for item in self._reviews:
             if item["status"] != status:
                 continue
-            mention = next(
-                (value for value in self._mentions if value["id"] == item["mention_id"]),
-                {},
-            )
+            mention = self._mentions_by_id.get(item["mention_id"], {})
             rows.append({**item, **{
                 key: mention.get(key)
                 for key in ("surface_form", "context", "source_url", "entity_type_hint")
@@ -219,13 +245,7 @@ class MemoryBackend:
             if review["id"] == review_id:
                 review.update(status=status, resolved_entity_id=entity_id, notes=notes)
                 if entity_id:
-                    mention = next(
-                        (
-                            item for item in self._mentions
-                            if item["id"] == review["mention_id"]
-                        ),
-                        None,
-                    )
+                    mention = self._mentions_by_id.get(review["mention_id"])
                     if mention:
                         self.add_alias(entity_id, mention["surface_form"])
                 break
@@ -298,6 +318,17 @@ class MemoryBackend:
             self.add_entity(entity_from_dict(payload))
         for payload in data.get("relationships", {}).values():
             self.add_relationship(Relationship.from_dict(payload))
+
+    def stats(self) -> dict[str, Any]:
+        type_distribution: dict[str, int] = {}
+        for entity in self._entities.values():
+            key = entity.entity_type.value
+            type_distribution[key] = type_distribution.get(key, 0) + 1
+        return {
+            "entity_count": len(self._entities),
+            "relationship_count": len(self._relationships),
+            "type_distribution": type_distribution,
+        }
 
     @property
     def entity_count(self) -> int:

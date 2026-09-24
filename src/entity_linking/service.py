@@ -50,11 +50,14 @@ class EntityLinkingService:
         run_id: str = "",
     ) -> list[LinkDecision]:
         deduplicated = self._deduplicate_mentions(mentions)
+        query_embeddings = self._embed_mentions(deduplicated)
         candidate_sets: list[list[EntityCandidate]] = []
         degraded_by_mention: list[list[str]] = []
-        for mention in deduplicated:
+        for mention, query_embedding in zip(deduplicated, query_embeddings):
             mention.normalized_text = mention.normalized_text or normalize_surface(mention.text)
-            candidates, degraded = self.retriever.retrieve(mention)
+            candidates, degraded = self.retriever.retrieve(
+                mention, query_embedding=query_embedding
+            )
             candidate_sets.append(rerank(candidates))
             degraded_by_mention.append(degraded)
         apply_graph_coherence(self.store, candidate_sets)
@@ -70,6 +73,32 @@ class EntityLinkingService:
             for decision in decisions:
                 self._persist(decision, run_id)
         return decisions
+
+    def _embed_mentions(self, mentions: list[Mention]) -> list[list[float] | None]:
+        """One embedding request for the whole mention batch.
+
+        ``None`` tells the retriever to embed that mention itself, which keeps
+        the per-mention failure path when the batch call is unavailable.
+        """
+        if not mentions or not self.embeddings.available:
+            return [None] * len(mentions)
+        texts = [
+            f"{mention.text}\n{mention.context}\n{' '.join(mention.expected_types)}"
+            for mention in mentions
+        ]
+        try:
+            vectors = self.embeddings.embed_documents(texts)
+        except Exception:
+            logger.warning("Batch mention embedding failed", exc_info=True)
+            return [None] * len(mentions)
+        if len(vectors) != len(mentions):
+            logger.warning(
+                "Batch mention embedding returned %s vectors for %s mentions",
+                len(vectors),
+                len(mentions),
+            )
+            return [None] * len(mentions)
+        return [list(vector) for vector in vectors]
 
     def persist_decision(self, decision: LinkDecision, run_id: str = "") -> None:
         self._persist(decision, run_id)

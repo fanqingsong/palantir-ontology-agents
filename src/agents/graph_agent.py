@@ -17,8 +17,6 @@ from src.ontology.store import OntologyStore
 from src.tools.ontology_tools import (
     find_dependency_chains,
     get_exposure_report,
-    find_shortest_path,
-    traverse_entity,
 )
 
 
@@ -165,7 +163,6 @@ class GraphAnalystAgent:
     def _find_critical_paths(self, entity_ids: list[str]) -> list[dict[str, Any]]:
         """Find shortest paths between all pairs of focus entities."""
         paths: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
 
         # Also include threats
         threat_ids = [
@@ -173,24 +170,31 @@ class GraphAnalystAgent:
         ]
         all_ids = list(set(entity_ids + threat_ids))
 
-        for i, src in enumerate(all_ids):
-            for tgt in all_ids[i + 1:]:
-                pair = tuple(sorted([src, tgt]))
-                if pair in seen:
+        names: dict[str, str] = {}
+
+        def endpoint_name(entity_id: str) -> str:
+            if entity_id not in names:
+                entity = self.store.get_entity(entity_id)
+                names[entity_id] = entity.name if entity else entity_id
+            return names[entity_id]
+
+        for index, src in enumerate(all_ids):
+            found = self.store.find_paths_from(src, all_ids[index + 1:])
+            for tgt, node_ids in found.items():
+                if len(node_ids) <= 1:
                     continue
-                seen.add(pair)
-                path = find_shortest_path(self.store, src, tgt)
-                if path and len(path) > 1:
-                    src_entity = self.store.get_entity(src)
-                    tgt_entity = self.store.get_entity(tgt)
-                    paths.append({
-                        "source": src,
-                        "source_name": src_entity.name if src_entity else src,
-                        "target": tgt,
-                        "target_name": tgt_entity.name if tgt_entity else tgt,
-                        "path": path,
-                        "hops": len(path) - 1,
-                    })
+                path = [
+                    {"id": node_id, "name": endpoint_name(node_id)}
+                    for node_id in node_ids
+                ]
+                paths.append({
+                    "source": src,
+                    "source_name": endpoint_name(src),
+                    "target": tgt,
+                    "target_name": endpoint_name(tgt),
+                    "path": path,
+                    "hops": len(path) - 1,
+                })
 
         paths.sort(key=lambda p: p["hops"])
         return paths[:20]
@@ -218,7 +222,7 @@ class GraphAnalystAgent:
         }
 
         for eid in entity_ids[:5]:
-            traversal = traverse_entity(self.store, eid, hops=3)
+            traversal = self.store.traverse(eid, hops=3)
             entity = self.store.get_entity(eid)
             stats["traversals"].append({
                 "entity": entity.name if entity else eid,

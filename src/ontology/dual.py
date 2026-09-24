@@ -6,6 +6,7 @@ import logging
 import os
 from typing import Any, Optional
 
+from src.ontology.graph_ops import exposure_scores, shortest_paths_from
 from src.ontology.neo4j_backend import Neo4jBackend
 from src.ontology.outbox_projector import OutboxProjector
 from src.ontology.postgres_backend import PostgresBackend
@@ -173,6 +174,21 @@ class DualBackend:
     def find_path(self, source_id: str, target_id: str, max_hops: int = 5) -> Optional[list[str]]:
         return self._graph().find_path(source_id, target_id, max_hops=max_hops)
 
+    def find_paths_from(
+        self,
+        source_id: str,
+        target_ids: list[str],
+        max_hops: int = 5,
+    ) -> dict[str, list[str]]:
+        graph = self._graph()
+        method = getattr(graph, "find_paths_from", None)
+        if callable(method):
+            return dict(method(source_id, target_ids, max_hops))
+        return shortest_paths_from(graph, source_id, target_ids, max_hops=max_hops)
+
+    def stats(self) -> dict[str, Any]:
+        return self.postgres.stats()
+
     def get_dependency_chains(
         self,
         entity_id: str,
@@ -187,6 +203,17 @@ class DualBackend:
         self, entity_id: str, threat_ids: Optional[list[str]] = None
     ) -> float:
         return self._graph().calculate_exposure_score(entity_id, threat_ids=threat_ids)
+
+    def exposure_scores(
+        self,
+        entity_ids: list[str],
+        threat_ids: list[str],
+    ) -> dict[str, float]:
+        graph = self._graph()
+        method = getattr(graph, "exposure_scores", None)
+        if callable(method):
+            return dict(method(entity_ids, threat_ids))
+        return exposure_scores(graph, entity_ids, threat_ids)
 
     def to_dict(self) -> dict[str, Any]:
         return self.postgres.to_dict()

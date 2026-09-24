@@ -57,25 +57,33 @@ class HybridCandidateRetriever:
         self.embeddings = embedding_provider or EmbeddingProvider()
         self.limit = limit
 
-    def retrieve(self, mention: Mention) -> tuple[list[EntityCandidate], list[str]]:
+    def retrieve(
+        self,
+        mention: Mention,
+        query_embedding: list[float] | None = None,
+    ) -> tuple[list[EntityCandidate], list[str]]:
         # by_id: 全程唯一索引。键 = 本体实体 ID（tsmc），不是表面形式（台积电）。
         # degraded: 某条路挂了也继续，把原因带给 service._decide 写进 reasons。
         by_id: dict[str, EntityCandidate] = {}
         degraded: list[str] = []
-        query_embedding: list[float] = []
 
         # ── 1. 可选向量 ──────────────────────────────────────────
         # 这不是召回。只是给 Neo4j vector.queryNodes 准备查询向量。
         # 拼法：表面形式 + 上下文 + 期望类型，缺 OPENAI_API_KEY 整段跳过。
-        if self.embeddings.available:
-            try:
-                query_embedding = self.embeddings.embed_query(
-                    f"{mention.text}\n{mention.context}\n{' '.join(mention.expected_types)}"
-                )
-            except Exception as exc:
-                degraded.append(f"embedding unavailable: {exc}")
-        else:
-            degraded.append("embedding unavailable: OPENAI_API_KEY is not configured")
+        if query_embedding is None:
+            if self.embeddings.available:
+                try:
+                    query_embedding = self.embeddings.embed_query(
+                        f"{mention.text}\n{mention.context}\n{' '.join(mention.expected_types)}"
+                    )
+                except Exception as exc:
+                    degraded.append(f"embedding unavailable: {exc}")
+                    query_embedding = []
+            else:
+                degraded.append("embedding unavailable: OPENAI_API_KEY is not configured")
+                query_embedding = []
+        elif not query_embedding:
+            degraded.append("embedding unavailable: empty query embedding")
 
         # ── 2. 三路召回（语义并行，代码顺序执行；一路失败不影响另外两路）──
         #

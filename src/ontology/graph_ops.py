@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Optional, Protocol
 
 from src.ontology.schema import Entity, EntityType, Relationship, RelationshipType
+
+# find_path's default horizon. A path one hop past this scores 0, same as no path.
+_EXPOSURE_MAX_HOPS = 5
 
 
 class GraphView(Protocol):
@@ -29,10 +33,10 @@ def traverse(
     visited_entities: set[str] = {entity_id}
     visited_rels: set[str] = set()
     paths: list[list[str]] = [[entity_id]]
-    frontier = [(entity_id, [entity_id], 0)]
+    frontier: deque[tuple[str, list[str], int]] = deque([(entity_id, [entity_id], 0)])
 
     while frontier:
-        current_id, current_path, depth = frontier.pop(0)
+        current_id, current_path, depth = frontier.popleft()
         if depth >= hops:
             continue
         for neighbor, rel in view.get_neighbors(current_id, relationship_type):
@@ -60,21 +64,8 @@ def find_path(
     target_id: str,
     max_hops: int = 5,
 ) -> Optional[list[str]]:
-    if source_id == target_id:
-        return [source_id]
-    visited = {source_id}
-    queue = [(source_id, [source_id])]
-    while queue:
-        current, path = queue.pop(0)
-        if len(path) > max_hops + 1:
-            break
-        for neighbor, _ in view.get_neighbors(current):
-            if neighbor.id == target_id:
-                return path + [neighbor.id]
-            if neighbor.id not in visited:
-                visited.add(neighbor.id)
-                queue.append((neighbor.id, path + [neighbor.id]))
-    return None
+    found = shortest_paths_from(view, source_id, [target_id], max_hops=max_hops)
+    return found.get(target_id)
 
 
 def get_dependency_chains(
@@ -105,6 +96,89 @@ def get_dependency_chains(
     return chains
 
 
+def shortest_paths_from(
+    view: GraphView,
+    source_id: str,
+    target_ids: list[str],
+    max_hops: int = 5,
+) -> dict[str, list[str]]:
+    """One BFS from ``source_id`` to many targets.
+
+    The first time a target is reached is its shortest path, using the same
+    neighbor order as a single-target search.
+    """
+    remaining = {target_id for target_id in target_ids if target_id}
+    found: dict[str, list[str]] = {}
+    if source_id in remaining:
+        found[source_id] = [source_id]
+        remaining.remove(source_id)
+    if not remaining:
+        return found
+
+    visited = {source_id}
+    queue: deque[tuple[str, list[str]]] = deque([(source_id, [source_id])])
+    while queue and remaining:
+        current, path = queue.popleft()
+        if len(path) > max_hops + 1:
+            break
+        for neighbor, _rel in view.get_neighbors(current):
+            neighbor_id = neighbor.id
+            if neighbor_id in visited:
+                continue
+            visited.add(neighbor_id)
+            new_path = path + [neighbor_id]
+            if neighbor_id in remaining:
+                found[neighbor_id] = new_path
+                remaining.remove(neighbor_id)
+            queue.append((neighbor_id, new_path))
+    return found
+
+
+def exposure_from_hops(hops: Optional[int]) -> float:
+    if hops is None:
+        return 0.0
+    return round(max(0.0, 1.0 - (hops - 1) * 0.2), 2)
+
+
+def exposure_scores(
+    view: GraphView,
+    entity_ids: list[str],
+    threat_ids: list[str],
+) -> dict[str, float]:
+    """Score many entities with one multi-source BFS out of the threats.
+
+    Distance is undirected, matching ``find_path``. Hops past the scoring
+    horizon are 0, the same as an unreachable threat.
+    """
+    if not threat_ids:
+        return {entity_id: 0.0 for entity_id in entity_ids}
+
+    distances: dict[str, int] = {}
+    queue: deque[tuple[str, int]] = deque()
+    for threat_id in dict.fromkeys(threat_ids):
+        if threat_id not in distances:
+            distances[threat_id] = 0
+            queue.append((threat_id, 0))
+
+    pending = {entity_id for entity_id in entity_ids if entity_id not in distances}
+    while queue and pending:
+        current, hops = queue.popleft()
+        if hops >= _EXPOSURE_MAX_HOPS:
+            continue
+        for neighbor, _rel in view.get_neighbors(current):
+            neighbor_id = neighbor.id
+            if neighbor_id in distances:
+                continue
+            distances[neighbor_id] = hops + 1
+            pending.discard(neighbor_id)
+            queue.append((neighbor_id, hops + 1))
+
+    return {
+        entity_id: exposure_from_hops(distances.get(entity_id))
+        for entity_id in entity_ids
+    }
+
+
 def calculate_exposure_score(
     view: GraphView,
     entity_id: str,
@@ -114,14 +188,28 @@ def calculate_exposure_score(
         threat_ids = [e.id for e in view.query_by_type(EntityType.THREAT)]
     if not threat_ids:
         return 0.0
-    max_score = 0.0
-    for tid in threat_ids:
-        path = find_path(view, entity_id, tid)
-        if path:
-            hop_distance = len(path) - 1
-            score = max(0, 1.0 - (hop_distance - 1) * 0.2)
-            max_score = max(max_score, score)
-    return round(max_score, 2)
+    if entity_id in threat_ids:
+        return exposure_from_hops(0)
+
+    # Expand from the entity and stop at the nearest threat. That is cheaper
+    # than walking every threat, and BFS makes the first hit the closest.
+    threat_set = set(threat_ids)
+    visited = {entity_id}
+    queue: deque[tuple[str, int]] = deque([(entity_id, 0)])
+    while queue:
+        current, hops = queue.popleft()
+        if hops >= _EXPOSURE_MAX_HOPS:
+            continue
+        for neighbor, _rel in view.get_neighbors(current):
+            neighbor_id = neighbor.id
+            if neighbor_id in visited:
+                continue
+            visited.add(neighbor_id)
+            next_hops = hops + 1
+            if neighbor_id in threat_set:
+                return exposure_from_hops(next_hops)
+            queue.append((neighbor_id, next_hops))
+    return 0.0
 
 
 def degree_by_entity(view: GraphView) -> dict[str, int]:

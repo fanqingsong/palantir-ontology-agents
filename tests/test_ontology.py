@@ -147,8 +147,24 @@ class TestOntologyStore:
 
     def test_calculate_exposure_score(self, minimal_store):
         score = minimal_store.calculate_exposure_score("org1")
-        assert 0.0 <= score <= 1.0
-        assert score > 0  # org1 is connected to threat via loc1
+        # org1 - loc1 - threat1 is two hops: 1.0 - (2 - 1) * 0.2
+        assert score == 0.8
+        # Zero hops: the threat is already the target, so the formula is 1.2.
+        assert minimal_store.calculate_exposure_score("threat1") == 1.2
+        assert minimal_store.exposure_scores(["org1", "threat1"], ["threat1"]) == {
+            "org1": 0.8,
+            "threat1": 1.2,
+        }
+
+    def test_exposure_report_matches_per_entity_scores(self, sample_ontology_store):
+        from src.tools.ontology_tools import get_exposure_report
+
+        report = get_exposure_report(sample_ontology_store)
+        assert report
+        for row in report:
+            assert row["exposure_score"] == sample_ontology_store.calculate_exposure_score(
+                row["entity_id"]
+            )
 
     def test_remove_entity(self, minimal_store):
         assert minimal_store.remove_entity("org1")

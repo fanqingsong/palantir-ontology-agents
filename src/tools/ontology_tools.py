@@ -12,6 +12,25 @@ from src.ontology.schema import EntityType, RelationshipType
 from src.ontology.store import OntologyStore
 
 
+def _entity_names(
+    store: OntologyStore,
+    entity_ids: list[str],
+    *,
+    missing: Optional[str] = None,
+) -> dict[str, str]:
+    """Resolve each id once. Path naming used to query the same entity repeatedly."""
+    names: dict[str, str] = {}
+    for entity_id in entity_ids:
+        if entity_id in names:
+            continue
+        entity = store.get_entity(entity_id)
+        if entity:
+            names[entity_id] = entity.name
+        else:
+            names[entity_id] = entity_id if missing is None else missing
+    return names
+
+
 def query_entities(store: OntologyStore, entity_type: Optional[str] = None,
                    search_term: Optional[str] = None) -> list[dict[str, Any]]:
     """Query entities from the ontology store.
@@ -51,14 +70,12 @@ def traverse_entity(store: OntologyStore, entity_id: str, hops: int = 2,
     rel_type = RelationshipType(relationship_type) if relationship_type else None
     result = store.traverse(entity_id, hops=hops, relationship_type=rel_type)
 
-    # Enrich with entity names
-    enriched_paths = []
-    for path in result["paths"]:
-        named_path = []
-        for eid in path:
-            entity = store.get_entity(eid)
-            named_path.append({"id": eid, "name": entity.name if entity else "unknown"})
-        enriched_paths.append(named_path)
+    flat_ids = [eid for path in result["paths"] for eid in path]
+    names = _entity_names(store, flat_ids, missing="unknown")
+    enriched_paths = [
+        [{"id": eid, "name": names.get(eid, "unknown")} for eid in path]
+        for path in result["paths"]
+    ]
 
     result["named_paths"] = enriched_paths
     result["entities"] = list(result["entities"])
@@ -76,14 +93,11 @@ def find_dependency_chains(
     chains = store.get_dependency_chains(
         entity_id, rel_types=rel_types, max_depth=max_depth
     )
-    named_chains = []
-    for chain in chains:
-        named_chain = []
-        for eid in chain:
-            entity = store.get_entity(eid)
-            named_chain.append({"id": eid, "name": entity.name if entity else eid})
-        named_chains.append(named_chain)
-    return named_chains
+    names = _entity_names(store, [eid for chain in chains for eid in chain])
+    return [
+        [{"id": eid, "name": names.get(eid, eid)} for eid in chain]
+        for chain in chains
+    ]
 
 
 def get_exposure_report(
@@ -98,20 +112,23 @@ def get_exposure_report(
         entities = []
         for entity_type in types:
             entities.extend(store.query_by_type(entity_type))
-        entity_ids = [e.id for e in entities]
+    else:
+        entities = []
+        for eid in entity_ids:
+            entity = store.get_entity(eid)
+            if entity:
+                entities.append(entity)
 
     threat_ids = [e.id for e in store.query_by_type(threat_entity_type)]
+    scores = store.exposure_scores([entity.id for entity in entities], threat_ids)
     report = []
-    for eid in entity_ids:
-        entity = store.get_entity(eid)
-        if entity:
-            score = store.calculate_exposure_score(eid, threat_ids=threat_ids)
-            report.append({
-                "entity_id": eid,
-                "name": entity.name,
-                "type": entity.entity_type.value,
-                "exposure_score": score,
-            })
+    for entity in entities:
+        report.append({
+            "entity_id": entity.id,
+            "name": entity.name,
+            "type": entity.entity_type.value,
+            "exposure_score": scores.get(entity.id, 0.0),
+        })
 
     report.sort(key=lambda x: x["exposure_score"], reverse=True)
     return report
@@ -131,4 +148,5 @@ def find_shortest_path(store: OntologyStore, source_id: str, target_id: str) -> 
     path = store.find_path(source_id, target_id)
     if path is None:
         return None
-    return [{"id": eid, "name": store.get_entity(eid).name if store.get_entity(eid) else eid} for eid in path]
+    names = _entity_names(store, path)
+    return [{"id": eid, "name": names.get(eid, eid)} for eid in path]

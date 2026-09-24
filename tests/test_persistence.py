@@ -247,9 +247,14 @@ def test_dual_write_invalidates_projection_until_next_read(monkeypatch):
     assert backend._projector.drain_pending.call_count == 2
 
 
-def test_snapshot_stats_are_lightweight(minimal_store: OntologyStore):
+def test_snapshot_stats_are_lightweight(minimal_store: OntologyStore, monkeypatch):
+    def refuse_full_dump(_self):
+        raise AssertionError("snapshot_stats serialized the full graph")
+
+    monkeypatch.setattr(type(minimal_store._backend), "to_dict", refuse_full_dump)
     stats = minimal_store.snapshot_stats()
     assert stats["entity_count"] == 3
+    assert stats["relationship_count"] == 2
     assert "entities" not in stats
 
 
