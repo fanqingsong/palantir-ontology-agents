@@ -257,7 +257,7 @@ Downstream Threat Assessor / Briefing Drafter still consume **serialized results
 | Ontology Store | **Live** | memory / postgres / neo4j / **dual** (PG + async outbox → Neo4j) |
 | Outbox projection | **Live** | Debezium CDC, Kafka, Prefect flows, reconcile schedule (Compose) |
 | Web Search Tool | **Live** | Tavily API with demo mode fallback |
-| Threat Assessor | Blueprint | Mock threat data, clean integration points for classified feeds |
+| Threat Assessor | Live scoring | This run's graph exposure and OSINT assertions set the risk score; category narratives still use the sample catalog |
 | Briefing Drafter | Blueprint | LLM generation with template, integration points for Palantir doc system |
 | Threat Database | Blueprint | Sample data, documented API for real threat feeds |
 | Document Generation | Blueprint | Template output, integration points for Palantir document pipeline |
@@ -602,7 +602,7 @@ That is why a question like "does a Kaohsiung blockade hit Apple?" is answered b
 | `memory` | Default for local runs and tests. In-process graph. |
 | `postgres` | System of record: `entities`, `relationships`, schema in `migrations/001_init.sql`. Traversal uses SQL neighbors + shared BFS. |
 | `neo4j` | Graph projection: typed labels and relationship types. `find_path` uses Cypher. |
-| `dual` | Compose default. **Authoritative writes** go to Postgres plus an **outbox row** in one transaction. Neo4j is updated asynchronously (see below). Entity reads use Postgres; graph traversal calls `drain_outbox()` then Neo4j, or falls back to Postgres if projection is behind. |
+| `dual` | Compose default. **Authoritative writes** go to Postgres plus an **outbox row** in one transaction. Neo4j is updated asynchronously (see below). Entity reads use Postgres. Graph traversal drains the outbox **once per analysis**, then reads Neo4j; if that drain fails, later reads use Postgres. |
 
 ### Dual mode: outbox and Neo4j projection
 
@@ -640,7 +640,7 @@ flowchart LR
 | 3 | `outbox-bridge` | On INSERT or retry-to-`pending`, triggers Prefect deployment `project-outbox-row/project-outbox-row` |
 | 4 | `OutboxProjector` | Claim row → `MERGE` into Neo4j → mark `done` |
 | 5 | `reconcile-pending-outbox` | Scheduled flow; re-triggers runs for any still-`pending` rows |
-| 6 | LangGraph nodes | `store.drain_outbox()` before graph ops — **read-your-writes** within a run |
+| 6 | `graph_analyst` node | `store.drain_outbox()` **once** after OSINT writes. Later neighbor, path, and exposure calls reuse that projection |
 
 **Sync vs async flush**
 

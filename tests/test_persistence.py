@@ -206,6 +206,47 @@ def test_apply_schema_runs_pending_migrations_once(tmp_path, monkeypatch):
     assert backend._conn.commits == 1
 
 
+def test_dual_graph_reads_drain_outbox_once(monkeypatch):
+    from unittest.mock import Mock
+
+    from src.ontology.dual import DualBackend
+
+    monkeypatch.setenv("OUTBOX_SYNC_FLUSH", "false")
+    postgres = Mock()
+    neo4j = Mock()
+    backend = DualBackend(postgres, neo4j)
+    backend._projector = Mock()
+    backend._projector.drain_pending.return_value = 2
+
+    backend.get_neighbors("tsmc")
+    backend.traverse("tsmc")
+    backend.find_path("tsmc", "apple")
+    backend.calculate_exposure_score("tsmc")
+    backend.graph_search_backend()
+
+    assert backend._projector.drain_pending.call_count == 1
+    neo4j.get_neighbors.assert_called_once()
+    neo4j.verify_connectivity.assert_called_once()
+
+
+def test_dual_write_invalidates_projection_until_next_read(monkeypatch):
+    from unittest.mock import Mock
+
+    from src.ontology.dual import DualBackend
+
+    monkeypatch.setenv("OUTBOX_SYNC_FLUSH", "false")
+    backend = DualBackend(Mock(), Mock())
+    backend._projector = Mock()
+    backend._projector.drain_pending.return_value = 1
+
+    backend.get_neighbors("tsmc")
+    backend.add_entity(Organization(id="new_event", name="New Event"))
+    backend.get_neighbors("tsmc")
+    backend.get_dependency_chains("tsmc")
+
+    assert backend._projector.drain_pending.call_count == 2
+
+
 def test_snapshot_stats_are_lightweight(minimal_store: OntologyStore):
     stats = minimal_store.snapshot_stats()
     assert stats["entity_count"] == 3

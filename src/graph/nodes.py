@@ -25,9 +25,7 @@ from src.agents.graph_agent import GraphAnalysisResult
 
 def _get_store(state: AgentState) -> OntologyStore:
     """Return the process-shared ontology store."""
-    store = get_shared_store()
-    store.drain_outbox()
-    return store
+    return get_shared_store()
 
 
 def _timeline_entry(agent: str, status: str, detail: str = "") -> dict[str, Any]:
@@ -112,6 +110,8 @@ def graph_analyst_node(state: AgentState, llm: Any = None) -> dict[str, Any]:
     """Graph Analyst node: traverses ontology and analyzes relationships."""
     query = state.get("query", "Taiwan Strait supply chain disruption")
     store = _get_store(state)
+    # One drain per analysis, after OSINT writes and before graph reads.
+    store.drain_outbox()
 
     timeline = state.get("timeline", []) or []
     timeline.append(_timeline_entry("graph_analyst", "started", "Ontology traversal initiated"))

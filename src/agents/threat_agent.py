@@ -63,12 +63,125 @@ class ThreatAssessmentResult:
         }
 
 
+_THREAT_RELATIONS = {"THREATENS"}
+_DEPENDENCY_RELATIONS = {"DEPENDS_ON", "SUPPLIES", "SUPPLIES_TO"}
+
+
+def _relation_type(item: dict[str, Any]) -> str:
+    raw = item.get("type") or item.get("predicate") or ""
+    if hasattr(raw, "value"):
+        raw = raw.value
+    return str(raw).upper()
+
+
+def _unit_interval(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(0.0, min(1.0, number))
+
+
+def _score_run_evidence(
+    osint_result: Optional[OSINTResult],
+    graph_result: Optional[GraphAnalysisResult],
+) -> tuple[Optional[float], dict[str, Any]]:
+    """Score this run from graph exposure and OSINT assertions.
+
+    Exposure uses the mean of the upper half of scores so the closest
+    entities dominate. Assertions weight THREATENS above supply edges and
+    other co-mentions. When both exist, exposure is 60% of the score.
+    """
+    exposure_values = [
+        _unit_interval(item.get("exposure_score"))
+        for item in (graph_result.exposure_scores if graph_result else [])
+        if isinstance(item, dict)
+    ]
+    assertions = [
+        item for item in (osint_result.new_relationships if osint_result else [])
+        if isinstance(item, dict)
+    ]
+    evidence: dict[str, Any] = {}
+
+    if exposure_values:
+        ranked = sorted(exposure_values, reverse=True)
+        top = ranked[: max(1, (len(ranked) + 1) // 2)]
+        evidence["graph_exposure"] = round(sum(top) / len(top), 4)
+        evidence["exposure_count"] = len(exposure_values)
+        evidence["high_exposure_count"] = sum(1 for value in exposure_values if value >= 0.6)
+
+    if assertions:
+        weighted: list[float] = []
+        threat_count = 0
+        for item in assertions:
+            rel_type = _relation_type(item)
+            confidence = _unit_interval(item.get("confidence"), default=0.5)
+            if rel_type in _THREAT_RELATIONS:
+                weight = 1.0
+                threat_count += 1
+            elif rel_type in _DEPENDENCY_RELATIONS:
+                weight = 0.7
+            else:
+                weight = 0.35
+            weighted.append(confidence * weight)
+        evidence["osint_assertion"] = round(sum(weighted) / len(weighted), 4)
+        evidence["assertion_count"] = len(assertions)
+        evidence["threat_assertion_count"] = threat_count
+
+    if "graph_exposure" in evidence and "osint_assertion" in evidence:
+        score = 0.6 * evidence["graph_exposure"] + 0.4 * evidence["osint_assertion"]
+        evidence["basis"] = "graph_exposure+osint_assertions"
+    elif "graph_exposure" in evidence:
+        score = evidence["graph_exposure"]
+        evidence["basis"] = "graph_exposure"
+    elif "osint_assertion" in evidence:
+        score = evidence["osint_assertion"]
+        evidence["basis"] = "osint_assertions"
+    else:
+        return None, {}
+
+    evidence["score"] = round(score, 2)
+    return evidence["score"], evidence
+
+
+def _evidence_finding(result: ThreatAssessmentResult) -> str:
+    evidence = result.risk_matrix.get("evidence") or {}
+    if not evidence:
+        return ""
+    return (
+        "Score basis: "
+        f"{evidence.get('basis')} "
+        f"(graph exposure {evidence.get('graph_exposure', 'n/a')}, "
+        f"OSINT assertions {evidence.get('assertion_count', 0)})"
+    )
+
+
+def _evidence_confidence(
+    osint_result: Optional[OSINTResult],
+    graph_result: Optional[GraphAnalysisResult],
+) -> Optional[float]:
+    """Confidence follows how much of this run is actually evidenced."""
+    parts: list[float] = []
+    assertions = [
+        item for item in (osint_result.new_relationships if osint_result else [])
+        if isinstance(item, dict)
+    ]
+    if assertions:
+        parts.append(sum(_unit_interval(item.get("confidence"), 0.5) for item in assertions) / len(assertions))
+    exposure_count = len(graph_result.exposure_scores) if graph_result else 0
+    if exposure_count:
+        parts.append(min(1.0, 0.5 + 0.05 * min(exposure_count, 10)))
+    if not parts:
+        return None
+    return round(sum(parts) / len(parts), 2)
+
+
 class ThreatAssessorAgent:
     """Threat assessment agent for risk scoring and threat analysis.
 
-    SCAFFOLDED: Produces realistic threat assessments using mock data.
-    Demonstrates the assessment structure and integration points that would
-    connect to classified intelligence feeds in production.
+    Overall risk follows this run's graph exposure and OSINT assertions.
+    The sample threat catalog remains the prior when a run has neither,
+    and still supplies category narratives until a live feed is connected.
     """
 
     def __init__(self, llm: Any = None):
@@ -89,12 +202,23 @@ class ThreatAssessorAgent:
         """
         result = ThreatAssessmentResult(query=query)
 
-        # Step 1: Get threat intelligence (mock)
+        # Step 1: Catalog is context. The numeric score comes from this run.
         threat_intel = get_threat_intelligence("taiwan_strait")
 
-        # Step 2: Calculate risk matrix
+        # Step 2: Prefer graph exposure and OSINT assertions over the catalog prior.
         result.risk_matrix = calculate_risk_matrix(threat_intel)
-        result.overall_risk_score = result.risk_matrix["overall_risk_score"]
+        catalog_prior = result.risk_matrix["overall_risk_score"]
+        evidence_score, evidence = _score_run_evidence(osint_result, graph_result)
+        if evidence_score is not None:
+            result.risk_matrix["catalog_prior"] = catalog_prior
+            result.risk_matrix["evidence"] = evidence
+            result.risk_matrix["overall_risk_score"] = evidence_score
+            result.overall_risk_score = evidence_score
+            evidence_confidence = _evidence_confidence(osint_result, graph_result)
+            if evidence_confidence is not None:
+                result.confidence = evidence_confidence
+        else:
+            result.overall_risk_score = catalog_prior
         result.overall_risk_level = self._score_to_level(result.overall_risk_score)
 
         # Step 3: Get historical precedents
@@ -113,12 +237,15 @@ class ThreatAssessorAgent:
             }
             result.threat_assessments.append(assessment)
 
-        # Step 5: Aggregate confidence
-        confidences = [ti.confidence for ti in threat_intel]
-        result.confidence = round(sum(confidences) / max(len(confidences), 1), 2)
+        # Step 5: Catalog confidence applies only when this run has no evidence.
+        if "evidence" not in result.risk_matrix:
+            confidences = [ti.confidence for ti in threat_intel]
+            result.confidence = round(sum(confidences) / max(len(confidences), 1), 2)
 
         # Step 6: Identify escalation indicators and mitigating factors
-        result.escalation_indicators = self._identify_escalation_indicators(threat_intel, osint_result)
+        result.escalation_indicators = self._identify_escalation_indicators(
+            threat_intel, osint_result, graph_result
+        )
         result.mitigating_factors = self._identify_mitigating_factors(threat_intel, graph_result)
 
         # Step 7: Key findings
@@ -190,7 +317,8 @@ class ThreatAssessorAgent:
         return assessments.get(ti.category, f"Assessment pending for {ti.category} threat category.")
 
     def _identify_escalation_indicators(self, threat_intel: list[ThreatIntelligence],
-                                         osint_result: Optional[OSINTResult]) -> list[str]:
+                                         osint_result: Optional[OSINTResult],
+                                         graph_result: Optional[GraphAnalysisResult] = None) -> list[str]:
         """Identify factors that could lead to escalation."""
         indicators = [
             "PLA exercise scale exceeds previous demonstrations (Joint Sword-2026A)",
@@ -204,6 +332,25 @@ class ThreatAssessorAgent:
                 f"Elevated media coverage ({osint_result.sources_consulted} sources) "
                 "indicates sustained international attention"
             )
+
+        threat_assertions = [
+            item for item in (osint_result.new_relationships if osint_result else [])
+            if isinstance(item, dict) and _relation_type(item) in _THREAT_RELATIONS
+        ]
+        if threat_assertions:
+            indicators.append(
+                f"{len(threat_assertions)} OSINT assertion(s) state a THREATENS relationship"
+            )
+
+        if graph_result and graph_result.exposure_scores:
+            high_exposure = sum(
+                1 for item in graph_result.exposure_scores
+                if isinstance(item, dict) and _unit_interval(item.get("exposure_score")) >= 0.6
+            )
+            if high_exposure:
+                indicators.append(
+                    f"{high_exposure} entities sit at high graph exposure (>= 0.6) to a recorded threat"
+                )
 
         return indicators
 
@@ -219,11 +366,14 @@ class ThreatAssessorAgent:
         ]
 
         if graph_result and graph_result.exposure_scores:
-            high_exposure = sum(1 for e in graph_result.exposure_scores if e["exposure_score"] >= 0.6)
-            factors.append(
-                f"Graph analysis shows {high_exposure} high-exposure entities, "
-                "creating economic disincentive for escalation on both sides"
+            high_exposure = sum(
+                1 for item in graph_result.exposure_scores
+                if isinstance(item, dict) and _unit_interval(item.get("exposure_score")) >= 0.6
             )
+            if high_exposure == 0:
+                factors.append(
+                    "Graph exposure for this run stays below 0.6"
+                )
 
         return factors
 
@@ -242,16 +392,23 @@ class ThreatAssessorAgent:
                 f"Confidence: {result.confidence}\n"
                 f"Threats: {', '.join(ta.get('category', '') for ta in result.threat_assessments)}\n"
                 f"Escalation indicators: {len(result.escalation_indicators)}\n"
-                f"Mitigating factors: {len(result.mitigating_factors)}",
+                f"Mitigating factors: {len(result.mitigating_factors)}\n"
+                f"Evidence: {result.risk_matrix.get('evidence') or 'catalog prior'}",
             )
             findings = bullet_lines(raw, limit=8)
             if findings:
+                evidence_line = _evidence_finding(result)
+                if evidence_line:
+                    findings.append(evidence_line)
                 return findings
 
         findings = [
             f"Overall risk level: {result.overall_risk_level} "
             f"(score: {result.overall_risk_score:.2f}, confidence: {result.confidence:.2f})",
         ]
+        evidence_line = _evidence_finding(result)
+        if evidence_line:
+            findings.append(evidence_line)
 
         critical_threats = [ta for ta in result.threat_assessments if ta["severity"] == "critical"]
         if critical_threats:

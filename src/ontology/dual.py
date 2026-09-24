@@ -25,24 +25,38 @@ class DualBackend:
         self.postgres = postgres
         self.neo4j = neo4j
         self._projector = OutboxProjector(postgres, neo4j)
+        # Graph reads reuse the last successful drain until the next Postgres write.
+        self._projection_ready = False
+        self._read_backend: PostgresBackend | Neo4jBackend = neo4j
 
     def flush_outbox(self) -> int:
-        return self._projector.drain_pending(worker_id="dual-backend")
+        processed = self._projector.drain_pending(worker_id="dual-backend")
+        self._read_backend = self.neo4j
+        self._projection_ready = True
+        return processed
 
     def _maybe_flush(self) -> None:
         if _sync_flush_on_write():
             self.flush_outbox()
 
+    def _note_write(self) -> None:
+        """Postgres is ahead of Neo4j until the next explicit or lazy drain."""
+        self._projection_ready = False
+        self._maybe_flush()
+
     def _graph(self):
+        if self._projection_ready:
+            return self._read_backend
         try:
             self.flush_outbox()
-            return self.neo4j
         except Exception:
-            return self.postgres
+            self._read_backend = self.postgres
+            self._projection_ready = True
+        return self._read_backend
 
     def add_entity(self, entity: Entity) -> str:
         entity_id = self.postgres.add_entity(entity)
-        self._maybe_flush()
+        self._note_write()
         return entity_id
 
     def start_run(self, run_id: str, query: str) -> None:
@@ -50,13 +64,13 @@ class DualBackend:
 
     def add_relationship(self, relationship: Relationship) -> str:
         rel_id = self.postgres.add_relationship(relationship)
-        self._maybe_flush()
+        self._note_write()
         return rel_id
 
     def remove_entity(self, entity_id: str) -> bool:
         removed = self.postgres.remove_entity(entity_id)
         if removed:
-            self._maybe_flush()
+            self._note_write()
         return removed
 
     def get_entity(self, entity_id: str) -> Optional[Entity]:
@@ -79,7 +93,7 @@ class DualBackend:
 
     def add_alias(self, entity_id: str, alias: str, **metadata: Any) -> None:
         self.postgres.add_alias(entity_id, alias, **metadata)
-        self._maybe_flush()
+        self._note_write()
 
     def aliases_for(self, entity_id: str) -> list[str]:
         return self.postgres.aliases_for(entity_id)
@@ -117,7 +131,8 @@ class DualBackend:
         self.postgres.save_embedding(entity_id, model, embedding, content_hash)
 
     def graph_search_backend(self) -> Neo4jBackend:
-        self.flush_outbox()
+        if not self._projection_ready:
+            self.flush_outbox()
         self.neo4j.verify_connectivity()
         return self.neo4j
 

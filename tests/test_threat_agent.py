@@ -1,6 +1,7 @@
 """Tests for the Threat Assessor agent."""
 
 import pytest
+from src.agents.osint_agent import OSINTResult
 from src.agents.threat_agent import ThreatAssessorAgent, ThreatAssessmentResult
 
 
@@ -64,8 +65,42 @@ class TestThreatAssessorAgent:
 
     def test_incorporates_graph_result(self, sample_graph_result):
         agent = ThreatAssessorAgent()
+        baseline = agent.run("Taiwan Strait")
         result = agent.run("Taiwan Strait", graph_result=sample_graph_result)
         assert isinstance(result, ThreatAssessmentResult)
+        assert result.overall_risk_score == 0.95
+        assert result.overall_risk_level == "CRITICAL"
+        assert result.overall_risk_score != baseline.overall_risk_score
+        assert result.risk_matrix["evidence"]["basis"] == "graph_exposure"
+        assert any("high graph exposure" in item for item in result.escalation_indicators)
+        assert any(item.startswith("Score basis:") for item in result.key_findings)
+
+    def test_threat_assertions_score_higher_than_comentions(self):
+        agent = ThreatAssessorAgent()
+        threat = OSINTResult(new_relationships=[
+            {"type": "THREATENS", "confidence": 1.0, "source": "pla", "target": "tsmc"},
+        ])
+        comention = OSINTResult(new_relationships=[
+            {"type": "RELATED_TO", "confidence": 1.0, "source": "pla", "target": "tsmc"},
+        ])
+        threat_result = agent.run("Taiwan Strait", osint_result=threat)
+        weak_result = agent.run("Taiwan Strait", osint_result=comention)
+        assert threat_result.overall_risk_score == 1.0
+        assert weak_result.overall_risk_score == 0.35
+        assert any("THREATENS" in item for item in threat_result.escalation_indicators)
+
+    def test_blends_exposure_and_osint_assertions(self, sample_osint_result, sample_graph_result):
+        sample_osint_result.new_relationships = [
+            {"type": "THREATENS", "confidence": 0.5, "source": "blockade", "target": "kaohsiung"},
+        ]
+        result = ThreatAssessorAgent().run(
+            "Taiwan Strait",
+            osint_result=sample_osint_result,
+            graph_result=sample_graph_result,
+        )
+        assert result.overall_risk_score == 0.77
+        assert result.risk_matrix["evidence"]["basis"] == "graph_exposure+osint_assertions"
+        assert result.risk_matrix["catalog_prior"] != result.overall_risk_score
 
     def test_result_serializable(self):
         agent = ThreatAssessorAgent()
